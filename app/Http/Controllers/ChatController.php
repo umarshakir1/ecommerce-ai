@@ -122,8 +122,14 @@ class ChatController extends Controller
             $queryEmbedding = $this->aiService->generateEmbedding($embeddingText);
 
             // 5d. Hybrid vector + SQL search — always scoped to this client
+            // Short-circuit: follow-up questions about a previously shown product
+            // ("what is the sku of above part") reuse the last session products.
             $products = [];
-            if ($queryEmbedding !== null) {
+            if ($this->isFollowUpReference($userMessage)) {
+                $products = $this->getRecentContextProducts($sessionId, $clientId);
+            }
+
+            if (empty($products) && $queryEmbedding !== null) {
                 $products = $this->vectorSearchService->search($queryEmbedding, $intent, $clientId);
             }
 
@@ -274,7 +280,12 @@ class ChatController extends Controller
                 $intent   = $combined;
                 $products = [];
 
-                if ($embedding !== null) {
+                // Short-circuit follow-ups about previously shown products
+                if ($this->isFollowUpReference($userMessage)) {
+                    $products = $this->getRecentContextProducts($sessionId, $clientId);
+                }
+
+                if (empty($products) && $embedding !== null) {
                     $products = $this->vectorSearchService->search($embedding, $intent, $clientId);
                 }
 
@@ -607,27 +618,76 @@ class ChatController extends Controller
         if (!empty($intent['brand'])) {
             $like = '%' . strtolower($intent['brand']) . '%';
             $attrQuery->where(function ($q) use ($like) {
-                $q->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.brand'))) LIKE ?", [$like])
-                  ->orWhereRaw("JSON_SEARCH(`suppliers`, 'one', ?) IS NOT NULL", [$like]);
+                $q->orWhereRaw('LOWER(CAST(`attributes` AS CHAR)) LIKE ?', [$like])
+                  ->orWhereRaw('LOWER(CAST(`suppliers`   AS CHAR)) LIKE ?', [$like]);
             });
         }
         if (!empty($intent['color'])) {
             $like = '%' . strtolower($intent['color']) . '%';
-            $attrQuery->whereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.color'))) LIKE ?", [$like]);
+            $attrQuery->whereRaw('LOWER(CAST(`attributes` AS CHAR)) LIKE ?', [$like]);
         }
         if (!empty($intent['size'])) {
-            $val = strtolower($intent['size']);
-            $attrQuery->whereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.size'))) = ?", [$val]);
+            $like = '%' . strtolower($intent['size']) . '%';
+            $attrQuery->whereRaw('LOWER(CAST(`attributes` AS CHAR)) LIKE ?', [$like]);
         }
         if (!empty($intent['category'])) {
             $like = '%' . strtolower($intent['category']) . '%';
             $attrQuery->where(function ($q) use ($like) {
-                $q->orWhereRaw("JSON_SEARCH(`categories`, 'one', ?) IS NOT NULL", [$like])
-                  ->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
+                $q->orWhereRaw('LOWER(CAST(`categories`  AS CHAR)) LIKE ?', [$like])
+                  ->orWhereRaw('LOWER(CAST(`attributes`  AS CHAR)) LIKE ?', [$like]);
             });
         }
 
         return $attrQuery->orderByDesc('popularity')->limit(5)->get()->toArray();
+    }
+
+    /**
+     * Detect follow-up questions about a previously shown product.
+     * e.g. "what is the sku of above part", "its price", "tell me more about that"
+     */
+    private function isFollowUpReference(string $message): bool
+    {
+        $patterns = [
+            '/\b(above|previous|last|that|same)\s*(product|part|item|one)\b/i',
+            '/\b(sku|price|cost|name|image|description|detail|info)\s*(of|for)?\s*(above|that|previous|it|this)\b/i',
+            '/\bwhat\s+(is|are)\s+(the|its|their)\s+(sku|price|name|detail|description)\b/i',
+            '/\bits\s+(sku|price|name|description|detail|cost)\b/i',
+            '/\bmore\s+(about|detail|info)\s+(that|the\s+above|previous|it|this)\b/i',
+            '/\bshow\s+me\s+more\s+about\s+(it|that|this|above)\b/i',
+        ];
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $message)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Fetch the most recently shown products for a session from the DB.
+     * Uses the product IDs stored in the last assistant turn that had products.
+     */
+    private function getRecentContextProducts(string $sessionId, string $clientId): array
+    {
+        $lastTurn = Conversation::where('session_id', $sessionId)
+            ->where('role', 'assistant')
+            ->whereNotNull('products')
+            ->latest()
+            ->first();
+
+        if (! $lastTurn || empty($lastTurn->products)) {
+            return [];
+        }
+
+        $ids = array_filter(array_column($lastTurn->products, 'id'));
+        if (empty($ids)) {
+            return [];
+        }
+
+        return \App\Models\Product::where('client_id', $clientId)
+            ->whereIn('id', $ids)
+            ->get()
+            ->toArray();
     }
 
     /**
