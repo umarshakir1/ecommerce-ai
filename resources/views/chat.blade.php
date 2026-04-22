@@ -737,6 +737,7 @@
 
 <script>
     const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+    const apiKey    = @json($apiKey ?? '');
     let isLoading   = false;
     let msgCount    = 0;
 
@@ -815,9 +816,10 @@
             const res = await fetch('/api/chat/stream', {
                 method: 'POST',
                 headers: {
-                    'Content-Type': 'application/json',
-                    'X-CSRF-TOKEN': csrfToken,
-                    'Accept':       'text/event-stream',
+                    'Content-Type':  'application/json',
+                    'X-CSRF-TOKEN':  csrfToken,
+                    'Accept':        'text/event-stream',
+                    'Authorization': 'Bearer ' + apiKey,
                 },
                 body: JSON.stringify({ message }),
             });
@@ -883,7 +885,7 @@
         try {
             const res = await fetch('/api/chat', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrfToken, 'Accept': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrfToken, 'Accept': 'application/json', 'Authorization': 'Bearer ' + apiKey },
                 body: JSON.stringify({ message }),
             });
             if (!res.ok) {
@@ -1096,7 +1098,7 @@
     async function clearChat() {
         await fetch('/api/chat/history', {
             method: 'DELETE',
-            headers: { 'X-CSRF-TOKEN': csrfToken, 'Accept': 'application/json' },
+            headers: { 'X-CSRF-TOKEN': csrfToken, 'Accept': 'application/json', 'Authorization': 'Bearer ' + apiKey },
         });
 
         msgCount = 0;
