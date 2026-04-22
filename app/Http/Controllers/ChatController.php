@@ -220,6 +220,9 @@ class ChatController extends Controller
                 $history         = $this->getConversationHistory($sessionId);
                 $contextualQuery = $this->buildContextualQuery($userMessage, $history);
 
+                // ── 1b. Local greeting shortcut (avoids API misclassification) ─
+                $greetingIntent = $this->detectGreetingLocally($userMessage);
+
                 // ── 2. PARALLEL: classify+extract AND embedding ───────────────
                 [$combined, $embedding] = $this->aiService->classifyExtractAndEmbed(
                     $contextualQuery,
@@ -227,7 +230,8 @@ class ChatController extends Controller
                     array_slice($history, -4)
                 );
 
-                $conversationalIntent = $combined['conversational_intent'] ?? 'product_search';
+                $conversationalIntent = $greetingIntent
+                    ?? ($combined['conversational_intent'] ?? 'product_search');
 
                 Log::info('streamChat classified', [
                     'intent'  => $conversationalIntent,
@@ -558,6 +562,24 @@ class ChatController extends Controller
             ob_flush();
         }
         flush();
+    }
+
+    /**
+     * Detect simple greetings locally without an API call.
+     * Returns 'greeting' if matched, null otherwise.
+     */
+    private function detectGreetingLocally(string $message): ?string
+    {
+        $clean = strtolower(trim(preg_replace('/[^a-z\s]/i', '', $message)));
+
+        $greetings = [
+            'hi', 'hello', 'hey', 'salam', 'howdy', 'greetings',
+            'good morning', 'good evening', 'good afternoon', 'good day',
+            'hi there', 'hey there', 'hello there', 'what\'s up', 'whats up',
+            'assalam', 'assalamualaikum', 'salaam',
+        ];
+
+        return in_array($clean, $greetings, true) ? 'greeting' : null;
     }
 
     /**
