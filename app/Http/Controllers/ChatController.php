@@ -475,21 +475,39 @@ class ChatController extends Controller
         $base = \App\Models\Product::where('client_id', $clientId)
             ->where('is_deleted', false);
 
-        // ── 0. Extract numeric/part codes directly from raw query ─────────────
-        // Catches cases where AI fails to tag the code as sku/cross_reference.
-        // Match tokens that are: all-digits ≥4, or alphanumeric with . / - and ≥4 chars.
+        // ── 0a. Extract numeric/part codes from raw query ────────────────────
         $rawCodes = [];
         if (!empty($rawQuery)) {
             preg_match_all('/\b([A-Z0-9][A-Z0-9.\/\-]{3,})\b/i', $rawQuery, $rawMatches);
             foreach ($rawMatches[1] as $token) {
-                // Skip plain English words (only letters, no digits)
                 if (! preg_match('/\d/', $token)) {
                     continue;
                 }
-                $rawCodes[] = strtoupper(preg_replace('/[\.\/\-]/', '', $token)); // normalised (stripped)
-                $rawCodes[] = strtoupper($token);                                  // original form
+                $rawCodes[] = strtoupper(preg_replace('/[\.\/\-]/', '', $token));
+                $rawCodes[] = strtoupper($token);
             }
             $rawCodes = array_unique(array_filter($rawCodes));
+        }
+
+        // ── 0b. Extract significant words from raw query (catches typos) ─────
+        // Adds words like "break" even when AI normalises to "brake", so both
+        // are searched. LOWER(CAST) matching means "brake" still hits "Brake".
+        $rawWords = [];
+        if (!empty($rawQuery)) {
+            static $stopwords = [
+                'the','and','for','with','that','this','are','you','can','not',
+                'want','buy','find','show','get','have','like','need','also',
+                'any','all','some','give','tell','do','i','a','an','in','of',
+                'to','is','it','me','my','we','be','has','was','will',
+            ];
+            preg_match_all('/\b([a-zA-Z]{3,})\b/', $rawQuery, $wordMatches);
+            foreach ($wordMatches[1] as $word) {
+                $w = strtolower($word);
+                if (! in_array($w, $stopwords, true)) {
+                    $rawWords[] = $w;
+                }
+            }
+            $rawWords = array_unique($rawWords);
         }
 
         // ── 1. SKU: exact then LIKE (intent + raw codes) ──────────────────────
@@ -515,13 +533,11 @@ class ChatController extends Controller
         )));
 
         foreach ($crCandidates as $cr) {
-            $cr   = trim($cr);
-            $like = '%' . $cr . '%';
-            $hits = (clone $base)->where(function ($q) use ($cr, $like) {
-                $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$cr])
-                  ->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$like])
-                  ->orWhereRaw("JSON_SEARCH(`suppliers`,       'one', ?) IS NOT NULL", [$cr])
-                  ->orWhereRaw("JSON_SEARCH(`suppliers`,       'one', ?) IS NOT NULL", [$like]);
+            $cr      = strtolower(trim($cr));
+            $crLike  = '%' . $cr . '%';
+            $hits = (clone $base)->where(function ($q) use ($crLike) {
+                $q->orWhereRaw('LOWER(CAST(`cross_reference` AS CHAR)) LIKE ?', [$crLike])
+                  ->orWhereRaw('LOWER(CAST(`suppliers`       AS CHAR)) LIKE ?', [$crLike]);
             })->limit(5)->get();
 
             if ($hits->isNotEmpty()) {
@@ -543,31 +559,31 @@ class ChatController extends Controller
 
         // ── 4. Broad keyword OR search: text + JSON columns + attributes ─────
         $keywords = array_unique(array_filter(array_merge(
-            (array) ($intent['keywords'] ?? []),
-            !empty($intent['category']) ? [$intent['category']] : [],
-            !empty($intent['brand'])    ? [$intent['brand']]    : [],
+            array_map('strtolower', (array) ($intent['keywords'] ?? [])),
+            !empty($intent['category']) ? [strtolower($intent['category'])] : [],
+            !empty($intent['brand'])    ? [strtolower($intent['brand'])]    : [],
+            $rawWords,  // non-code words extracted directly from raw query
             $rawCodes
         )));
 
         if (!empty($keywords)) {
             $broadQuery = (clone $base)->where(function ($q) use ($keywords) {
-                foreach (array_slice($keywords, 0, 8) as $kw) {
-                    $kw = trim($kw);
+                foreach (array_slice($keywords, 0, 10) as $kw) {
+                    $kw = strtolower(trim($kw));
                     if (strlen($kw) < 2) {
                         continue;
                     }
                     $like = '%' . $kw . '%';
-                    // Core text columns
-                    $q->orWhere('name',              'LIKE', $like)
-                      ->orWhere('description',       'LIKE', $like)
-                      ->orWhere('short_description', 'LIKE', $like)
-                      ->orWhere('sku',               'LIKE', $like);
-                    // JSON multi-value columns
-                    $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$like])
-                      ->orWhereRaw("JSON_SEARCH(`suppliers`,       'one', ?) IS NOT NULL", [$like])
-                      ->orWhereRaw("JSON_SEARCH(`categories`,      'one', ?) IS NOT NULL", [$like]);
-                    // attributes JSON object: brand, synonym, notes, commodity_code, etc.
-                    $q->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
+                    // Core text columns (case-insensitive via LOWER)
+                    $q->orWhereRaw('LOWER(name)              LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(description)       LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(short_description) LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(sku)               LIKE ?', [$like]);
+                    // JSON columns — case-insensitive via LOWER(CAST)
+                    $q->orWhereRaw('LOWER(CAST(`cross_reference` AS CHAR)) LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(CAST(`suppliers`       AS CHAR)) LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(CAST(`categories`      AS CHAR)) LIKE ?', [$like])
+                      ->orWhereRaw('LOWER(CAST(`attributes`      AS CHAR)) LIKE ?', [$like]);
                 }
             });
 

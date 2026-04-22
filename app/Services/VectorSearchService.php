@@ -142,21 +142,21 @@ class VectorSearchService
             $query->whereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.size'))) = ?", [$val]);
         }
 
-        // Brand — check attributes JSON + suppliers JSON array
+        // Brand — check attributes JSON + suppliers JSON array (case-insensitive)
         if (!empty($intent['brand'])) {
             $like = '%' . strtolower($intent['brand']) . '%';
             $query->where(function ($q) use ($like) {
-                $q->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.brand'))) LIKE ?", [$like])
-                  ->orWhereRaw("JSON_SEARCH(`suppliers`, 'one', ?) IS NOT NULL", [$like]);
+                $q->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '$.brand'))) LIKE ?", [$like])
+                  ->orWhereRaw('LOWER(CAST(`suppliers` AS CHAR)) LIKE ?', [$like]);
             });
         }
 
-        // Category — check categories JSON array + attributes JSON
+        // Category — check categories JSON array + attributes JSON (case-insensitive)
         if (!empty($intent['category'])) {
             $like = '%' . strtolower($intent['category']) . '%';
             $query->where(function ($q) use ($like) {
-                $q->orWhereRaw("JSON_SEARCH(`categories`, 'one', ?) IS NOT NULL", [$like])
-                  ->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
+                $q->orWhereRaw('LOWER(CAST(`categories` AS CHAR)) LIKE ?', [$like])
+                  ->orWhereRaw('LOWER(CAST(`attributes` AS CHAR)) LIKE ?', [$like]);
             });
         }
 

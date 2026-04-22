@@ -252,7 +252,7 @@ You are an eCommerce assistant analyzer for an industrial/automotive parts catal
 - "gender": string or null ("male","female","unisex")
 - "intent": string summarizing what the user wants (max 10 words)
 - "price_range": {"min": float or null, "max": float or null}
-- "keywords": array of relevant product search keywords (max 6)
+- "keywords": array of relevant product search keywords (max 6). Correct obvious spelling mistakes (e.g. "break" → "brake", "absorber" → "absorber", "chambre" → "chamber", "surpensor" → "suspension"). Return the corrected form.
 
 Rules for conversational_intent:
 - History shows products + follow-up message ("what about in white?", "how much?") → "product_search"

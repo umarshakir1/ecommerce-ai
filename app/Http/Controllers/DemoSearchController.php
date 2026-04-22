@@ -179,68 +179,64 @@ PROMPT;
 
     private function applyFullSearch(\Illuminate\Database\Query\Builder $query, string $term, array $intent): void
     {
-        $like = '%' . $term . '%';
+        $lterm = strtolower($term);
+        $like  = '%' . $lterm . '%';
 
-        $query->where(function ($q) use ($term, $like, $intent) {
+        $query->where(function ($q) use ($term, $lterm, $like, $intent) {
 
-            // ── Core text columns (LIKE) ──────────────────────────────────────
-            $q->orWhere('name',              'LIKE', $like)
-              ->orWhere('description',       'LIKE', $like)
-              ->orWhere('short_description', 'LIKE', $like);
+            // ── Core text columns (case-insensitive) ──────────────────────────
+            $q->orWhereRaw('LOWER(name)              LIKE ?', [$like])
+              ->orWhereRaw('LOWER(description)       LIKE ?', [$like])
+              ->orWhereRaw('LOWER(short_description) LIKE ?', [$like]);
 
-            // ── SKU / url_key (exact + LIKE) ──────────────────────────────────
-            $q->orWhere('sku',     $term)
-              ->orWhere('sku',     'LIKE', $like)
-              ->orWhere('url_key', $term)
-              ->orWhere('url_key', 'LIKE', $like);
+            // ── SKU / url_key ─────────────────────────────────────────────────
+            $q->orWhereRaw('LOWER(sku)     = ?',    [$lterm])
+              ->orWhereRaw('LOWER(sku)     LIKE ?',  [$like])
+              ->orWhereRaw('LOWER(url_key) LIKE ?',  [$like]);
 
-            // ── JSON multi-value columns ──────────────────────────────────────
+            // ── JSON multi-value columns (case-insensitive via LOWER(CAST)) ───
             foreach (['cross_reference', 'suppliers', 'categories'] as $col) {
-                $q->orWhereRaw("JSON_SEARCH(`{$col}`, 'one', ?) IS NOT NULL", [$term])
-                  ->orWhereRaw("JSON_SEARCH(`{$col}`, 'one', ?) IS NOT NULL", [$like]);
+                $q->orWhereRaw("LOWER(CAST(`{$col}` AS CHAR)) LIKE ?", [$like]);
             }
 
             // ── attributes JSON object (all keys + values) ────────────────────
-            $q->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
+            $q->orWhereRaw('LOWER(CAST(`attributes` AS CHAR)) LIKE ?', [$like]);
 
             // ── AI-extracted cross_reference / supplier ───────────────────────
             if (! empty($intent['cross_reference'])) {
-                $cr = $intent['cross_reference'];
-                $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$cr]);
+                $cr = '%' . strtolower($intent['cross_reference']) . '%';
+                $q->orWhereRaw('LOWER(CAST(`cross_reference` AS CHAR)) LIKE ?', [$cr]);
             }
             if (! empty($intent['supplier'])) {
-                $sup = '%' . $intent['supplier'] . '%';
-                $q->orWhereRaw("JSON_SEARCH(`suppliers`, 'one', ?) IS NOT NULL", [$sup]);
+                $sup = '%' . strtolower($intent['supplier']) . '%';
+                $q->orWhereRaw('LOWER(CAST(`suppliers` AS CHAR)) LIKE ?', [$sup]);
             }
 
             // ── Keyword expansion ─────────────────────────────────────────────
             foreach (array_slice($intent['keywords'] ?? [], 0, 4) as $kw) {
-                $kw = trim($kw);
+                $kw = strtolower(trim($kw));
                 if (strlen($kw) < 2) {
                     continue;
                 }
                 $kwLike = '%' . $kw . '%';
-                $q->orWhere('name',        'LIKE', $kwLike)
-                  ->orWhere('description', 'LIKE', $kwLike)
-                  ->orWhereRaw("JSON_SEARCH(`categories`, 'one', ?) IS NOT NULL", [$kwLike])
-                  ->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$kwLike]);
+                $q->orWhereRaw('LOWER(name)        LIKE ?', [$kwLike])
+                  ->orWhereRaw('LOWER(description) LIKE ?', [$kwLike])
+                  ->orWhereRaw('LOWER(CAST(`categories` AS CHAR)) LIKE ?', [$kwLike])
+                  ->orWhereRaw('LOWER(CAST(`attributes` AS CHAR)) LIKE ?', [$kwLike]);
             }
         });
     }
 
     private function applyFieldSearch(\Illuminate\Database\Query\Builder $query, string $field, string $term): void
     {
-        $like = '%' . $term . '%';
+        $lterm = strtolower($term);
+        $like  = '%' . $lterm . '%';
 
         if ($field === 'attributes') {
-            // Search all keys and values inside the attributes JSON object
-            $query->whereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
+            $query->whereRaw('LOWER(CAST(`attributes` AS CHAR)) LIKE ?', [$like]);
 
         } elseif (in_array($field, ['cross_reference', 'suppliers', 'categories'], true)) {
-            $query->where(function ($q) use ($field, $term, $like) {
-                $q->orWhereRaw("JSON_SEARCH(`{$field}`, 'one', ?) IS NOT NULL", [$term])
-                  ->orWhereRaw("JSON_SEARCH(`{$field}`, 'one', ?) IS NOT NULL", [$like]);
-            });
+            $query->whereRaw("LOWER(CAST(`{$field}` AS CHAR)) LIKE ?", [$like]);
 
         } elseif (in_array($field, ['sku', 'url_key'], true)) {
             $query->where(function ($q) use ($field, $term, $like) {
