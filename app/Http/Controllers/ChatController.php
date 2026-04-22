@@ -279,7 +279,7 @@ class ChatController extends Controller
                 }
 
                 if (empty($products)) {
-                    $products = $this->fallbackSqlSearch($intent, $clientId);
+                    $products = $this->fallbackSqlSearch($intent, $clientId, $userMessage);
                 }
 
                 // Send products BEFORE streaming the text so cards appear first
@@ -468,34 +468,58 @@ class ChatController extends Controller
      *   5. Attribute filters (brand, color, size, category) as refinement
      * ALWAYS scoped to client_id — no cross-tenant access.
      */
-    private function fallbackSqlSearch(array $intent, string $clientId): array
+    private function fallbackSqlSearch(array $intent, string $clientId, string $rawQuery = ''): array
     {
         $base = \App\Models\Product::where('client_id', $clientId)
             ->where('is_deleted', false);
 
-        // ── 1. SKU: exact then LIKE ───────────────────────────────────────────
-        if (!empty($intent['sku'])) {
-            $skuUpper = strtoupper(trim($intent['sku']));
+        // ── 0. Extract numeric/part codes directly from raw query ─────────────
+        // Catches cases where AI fails to tag the code as sku/cross_reference.
+        // Match tokens that are: all-digits ≥4, or alphanumeric with . / - and ≥4 chars.
+        $rawCodes = [];
+        if (!empty($rawQuery)) {
+            preg_match_all('/\b([A-Z0-9][A-Z0-9.\/\-]{3,})\b/i', $rawQuery, $rawMatches);
+            foreach ($rawMatches[1] as $token) {
+                // Skip plain English words (only letters, no digits)
+                if (! preg_match('/\d/', $token)) {
+                    continue;
+                }
+                $rawCodes[] = strtoupper(preg_replace('/[\.\/\-]/', '', $token)); // normalised (stripped)
+                $rawCodes[] = strtoupper($token);                                  // original form
+            }
+            $rawCodes = array_unique(array_filter($rawCodes));
+        }
 
-            $hit = (clone $base)->whereRaw('UPPER(sku) = ?', [$skuUpper])->first();
+        // ── 1. SKU: exact then LIKE (intent + raw codes) ──────────────────────
+        $skuCandidates = array_filter([
+            !empty($intent['sku']) ? strtoupper(trim($intent['sku'])) : null,
+        ]);
+        $skuCandidates = array_unique(array_merge($skuCandidates, $rawCodes));
+
+        foreach ($skuCandidates as $candidate) {
+            $hit = (clone $base)->whereRaw('UPPER(sku) = ?', [$candidate])->first();
             if (! $hit) {
-                $hit = (clone $base)->whereRaw('UPPER(sku) LIKE ?', ['%' . $skuUpper . '%'])->first();
+                $hit = (clone $base)->whereRaw('UPPER(sku) LIKE ?', ['%' . $candidate . '%'])->first();
             }
             if ($hit) {
                 return [$hit->toArray()];
             }
         }
 
-        // ── 2. Cross-reference number search (JSON array) ─────────────────────
-        $crossRef = $intent['cross_reference'] ?? $intent['sku'] ?? null;
-        if (!empty($crossRef)) {
-            $cr = trim($crossRef);
+        // ── 2. Cross-reference JSON search (intent + raw codes) ───────────────
+        $crCandidates = array_unique(array_filter(array_merge(
+            [$intent['cross_reference'] ?? null, $intent['sku'] ?? null],
+            $rawCodes
+        )));
 
-            $hits = (clone $base)->where(function ($q) use ($cr) {
+        foreach ($crCandidates as $cr) {
+            $cr   = trim($cr);
+            $like = '%' . $cr . '%';
+            $hits = (clone $base)->where(function ($q) use ($cr, $like) {
                 $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$cr])
                   ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", [$cr])
-                  ->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", ['%' . $cr . '%'])
-                  ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", ['%' . $cr . '%']);
+                  ->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$like])
+                  ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", [$like]);
             })->limit(5)->get();
 
             if ($hits->isNotEmpty()) {
@@ -503,33 +527,31 @@ class ChatController extends Controller
             }
         }
 
-        // ── 3. commodity_code exact + LIKE ────────────────────────────────────
-        if (!empty($intent['sku']) || !empty($intent['cross_reference'])) {
-            $code = trim($intent['cross_reference'] ?? $intent['sku']);
-
-            $hit = (clone $base)
-                ->where(function ($q) use ($code) {
-                    $q->where('commodity_code', $code)
-                      ->orWhere('commodity_code', 'LIKE', '%' . $code . '%')
-                      ->orWhere('url_key', $code)
-                      ->orWhere('url_key', 'LIKE', '%' . $code . '%');
-                })->first();
+        // ── 3. commodity_code / url_key (intent + raw codes) ──────────────────
+        foreach ($crCandidates as $code) {
+            $hit = (clone $base)->where(function ($q) use ($code) {
+                $q->where('commodity_code', $code)
+                  ->orWhere('commodity_code', 'LIKE', '%' . $code . '%')
+                  ->orWhere('url_key', $code)
+                  ->orWhere('url_key', 'LIKE', '%' . $code . '%');
+            })->first();
 
             if ($hit) {
                 return [$hit->toArray()];
             }
         }
 
-        // ── 4. Broad keyword OR search across all text fields ─────────────────
-        $keywords = array_filter(array_merge(
+        // ── 4. Broad keyword OR search across all text + sku + cross_ref ──────
+        $keywords = array_unique(array_filter(array_merge(
             (array) ($intent['keywords'] ?? []),
             !empty($intent['category']) ? [$intent['category']] : [],
-            !empty($intent['brand'])    ? [$intent['brand']]    : []
-        ));
+            !empty($intent['brand'])    ? [$intent['brand']]    : [],
+            $rawCodes
+        )));
 
         if (!empty($keywords)) {
             $broadQuery = (clone $base)->where(function ($q) use ($keywords) {
-                foreach (array_slice($keywords, 0, 6) as $kw) {
+                foreach (array_slice($keywords, 0, 8) as $kw) {
                     $kw = trim($kw);
                     if (strlen($kw) < 2) {
                         continue;
@@ -546,11 +568,13 @@ class ChatController extends Controller
                       ->orWhere('synonym', 'LIKE', $like)
                       ->orWhere('notes', 'LIKE', $like)
                       ->orWhere('brand', 'LIKE', $like)
+                      ->orWhere('sku', 'LIKE', $like)
+                      ->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$like])
+                      ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", [$like])
                       ->orWhereRaw("JSON_SEARCH(`supplier`, 'one', ?) IS NOT NULL", [$like]);
                 }
             });
 
-            // Narrow by hard attributes if present
             if (!empty($intent['color'])) {
                 $broadQuery->whereRaw('LOWER(color) LIKE ?', ['%' . strtolower($intent['color']) . '%']);
             }
@@ -565,7 +589,14 @@ class ChatController extends Controller
             }
         }
 
-        // ── 5. Attribute-only fallback (no keywords) ──────────────────────────
+        // ── 5. Attribute-only fallback (no keywords, no codes) ────────────────
+        $hasAttribute = !empty($intent['brand']) || !empty($intent['color'])
+            || !empty($intent['size'])  || !empty($intent['category']);
+
+        if (! $hasAttribute) {
+            return []; // Nothing meaningful to filter on — return empty rather than top-5 noise
+        }
+
         $attrQuery = (clone $base);
 
         if (!empty($intent['brand'])) {
