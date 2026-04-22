@@ -8,17 +8,11 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('products', function (Blueprint $table) {
-            $table->string('brand')->nullable()->after('sku');
-            $table->json('available_sizes')->nullable()->after('size');
-            $table->json('available_colors')->nullable()->after('color');
-        });
+        // No-op: brand, available_sizes, available_colors are now in the base create_products_table migration.
     }
 
     public function down(): void
     {
-        Schema::table('products', function (Blueprint $table) {
-            $table->dropColumn(['brand', 'available_sizes', 'available_colors']);
-        });
+        // No-op.
     }
 };

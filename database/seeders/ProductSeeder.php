@@ -2,13 +2,16 @@
 
 namespace Database\Seeders;
 
-use App\Models\Product;
 use Illuminate\Database\Seeder;
 
 class ProductSeeder extends Seeder
 {
     public function run(): void
     {
+        // Products are now imported via DemoProductSeeder from eCommerceMaster.csv
+        $this->command->info('ProductSeeder: skipped — use DemoProductSeeder for CSV import.');
+        return;
+
         $products = [
             // ── T-Shirts ──────────────────────────────────────────────────────
             [

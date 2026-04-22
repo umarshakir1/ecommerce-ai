@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\ChatController;
+use App\Http\Controllers\DemoSearchController;
 use App\Http\Controllers\PriorityController;
 use App\Http\Controllers\SyncController;
 use App\Http\Middleware\ApiKeyMiddleware;
@@ -13,6 +14,9 @@ use Illuminate\Support\Facades\Route;
 | API Routes - eCommerce AI SaaS Platform
 |--------------------------------------------------------------------------
 */
+
+// ── Public demo search (no API key required) ──────────────────────────────
+Route::get('/demo/search', [DemoSearchController::class, 'search']);
 
 // ── Public auth routes (no API key required) ──────────────────────────────
 Route::prefix('auth')->group(function () {

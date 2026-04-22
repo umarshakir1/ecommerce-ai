@@ -10,32 +10,71 @@ class Product extends Model
     use HasFactory;
 
     protected $fillable = [
+        // Multi-tenancy
         'client_id',
-        'sku',
-        'brand',
-        'name',
-        'description',
-        'category',
-        'color',
-        'available_colors',
-        'size',
-        'available_sizes',
-        'price',
-        'image',
-        'tags',
-        'embedding',
-        'popularity',
-        'in_stock',
+        // Identification
+        'sku', 'url_key', 'commodity_code',
+        // Core text
+        'name', 'description', 'short_description', 'notes', 'synonym', 'conind',
+        // Categorisation
+        'brand', 'category', 'categories', 'product_groups', 'store_model', 'sub_range',
+        // Variants (chat-compat)
+        'color', 'available_colors', 'size', 'available_sizes', 'image',
+        // Pricing
+        'price', 'rrp_value', 'selling_surcharge',
+        // Inventory
+        'qty', 'allow_backorders', 'website_id', 'in_stock',
+        // Physical
+        'weight_kg', 'package_width', 'package_depth', 'package_length',
+        // Flags
+        'is_deleted', 'is_updated', 'is_new', 'is_images_updated',
+        // Dates
+        'new_from_date', 'new_to_date',
+        // JSON multi-value
+        'tags', 'cross_reference', 'cross_reference_syn',
+        'supplier', 'supplier_v2', 'additional_attributes',
+        'related_skus', 'crosssell_skus', 'upsell_skus', 'additional_images',
+        // AI / RAG
+        'embedding', 'popularity',
     ];
 
     protected $casts = [
-        'tags'             => 'array',
-        'available_sizes'  => 'array',
-        'available_colors' => 'array',
+        // JSON arrays
+        'tags'                => 'array',
+        'available_sizes'     => 'array',
+        'available_colors'    => 'array',
+        'cross_reference'     => 'array',
+        'cross_reference_syn' => 'array',
+        'supplier'            => 'array',
+        'supplier_v2'         => 'array',
+        'related_skus'        => 'array',
+        'crosssell_skus'      => 'array',
+        'upsell_skus'         => 'array',
+        'additional_images'   => 'array',
+        // JSON object
+        'additional_attributes' => 'array',
+        // Numerics
         'price'            => 'float',
-        'in_stock'         => 'boolean',
+        'rrp_value'        => 'float',
+        'selling_surcharge' => 'float',
+        'weight_kg'        => 'float',
+        'package_width'    => 'float',
+        'package_depth'    => 'float',
+        'package_length'   => 'float',
+        'qty'              => 'integer',
+        'allow_backorders' => 'integer',
+        'website_id'       => 'integer',
         'popularity'       => 'integer',
-        // embedding is stored as raw JSON string; we decode manually in VectorSearchService
+        // Booleans
+        'in_stock'          => 'boolean',
+        'is_deleted'        => 'boolean',
+        'is_updated'        => 'boolean',
+        'is_new'            => 'boolean',
+        'is_images_updated' => 'boolean',
+        // Dates
+        'new_from_date' => 'date',
+        'new_to_date'   => 'date',
+        // embedding stored as raw JSON string; decoded manually in VectorSearchService
     ];
 
     /**

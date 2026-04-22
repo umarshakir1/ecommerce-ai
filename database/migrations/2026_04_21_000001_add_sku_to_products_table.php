@@ -8,15 +8,11 @@ return new class extends Migration
 {
     public function up(): void
     {
-        Schema::table('products', function (Blueprint $table) {
-            $table->string('sku')->nullable()->unique()->after('id');
-        });
+        // No-op: sku is now defined in the base create_products_table migration.
     }
 
     public function down(): void
     {
-        Schema::table('products', function (Blueprint $table) {
-            $table->dropColumn('sku');
-        });
+        // No-op.
     }
 };
