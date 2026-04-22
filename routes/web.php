@@ -5,7 +5,7 @@ use App\Http\Middleware\AdminMiddleware;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/', function () {
-    $apiKey = auth()->user()?->api_key ?? env('DEMO_API_KEY', '');
+    $apiKey = auth()->user()?->api_key ?? config('app.demo_api_key', '');
     return view('chat', compact('apiKey'));
 });
 
