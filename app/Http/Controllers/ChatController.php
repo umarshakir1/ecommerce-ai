@@ -459,48 +459,135 @@ class ChatController extends Controller
     }
 
     /**
-     * Fallback search using pure SQL when embedding is unavailable.
-     * Filters by color/size/category and returns up to 5 products.
+     * Fallback search using pure SQL when no embedding is available.
+     * Searches across ALL relevant fields in priority order:
+     *   1. SKU exact → SKU LIKE
+     *   2. cross_reference / cross_reference_syn JSON array contains
+     *   3. commodity_code exact → LIKE
+     *   4. Broad OR across name, description, categories, synonym, notes + keywords
+     *   5. Attribute filters (brand, color, size, category) as refinement
      * ALWAYS scoped to client_id — no cross-tenant access.
      */
     private function fallbackSqlSearch(array $intent, string $clientId): array
     {
-        // SKU match takes priority — exact then partial LIKE fallback
+        $base = \App\Models\Product::where('client_id', $clientId)
+            ->where('is_deleted', false);
+
+        // ── 1. SKU: exact then LIKE ───────────────────────────────────────────
         if (!empty($intent['sku'])) {
-            $skuUpper = strtoupper($intent['sku']);
+            $skuUpper = strtoupper(trim($intent['sku']));
 
-            $product = \App\Models\Product::where('client_id', $clientId)
-                ->whereRaw('UPPER(sku) = ?', [$skuUpper])
-                ->first();
-
-            if (! $product) {
-                $product = \App\Models\Product::where('client_id', $clientId)
-                    ->whereRaw('UPPER(sku) LIKE ?', ['%' . $skuUpper . '%'])
-                    ->first();
+            $hit = (clone $base)->whereRaw('UPPER(sku) = ?', [$skuUpper])->first();
+            if (! $hit) {
+                $hit = (clone $base)->whereRaw('UPPER(sku) LIKE ?', ['%' . $skuUpper . '%'])->first();
             }
-
-            if ($product) {
-                return [$product->toArray()];
+            if ($hit) {
+                return [$hit->toArray()];
             }
         }
 
-        $query = \App\Models\Product::where('in_stock', true)
-            ->where('client_id', $clientId);
+        // ── 2. Cross-reference number search (JSON array) ─────────────────────
+        $crossRef = $intent['cross_reference'] ?? $intent['sku'] ?? null;
+        if (!empty($crossRef)) {
+            $cr = trim($crossRef);
+
+            $hits = (clone $base)->where(function ($q) use ($cr) {
+                $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$cr])
+                  ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", [$cr])
+                  ->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", ['%' . $cr . '%'])
+                  ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", ['%' . $cr . '%']);
+            })->limit(5)->get();
+
+            if ($hits->isNotEmpty()) {
+                return $hits->toArray();
+            }
+        }
+
+        // ── 3. commodity_code exact + LIKE ────────────────────────────────────
+        if (!empty($intent['sku']) || !empty($intent['cross_reference'])) {
+            $code = trim($intent['cross_reference'] ?? $intent['sku']);
+
+            $hit = (clone $base)
+                ->where(function ($q) use ($code) {
+                    $q->where('commodity_code', $code)
+                      ->orWhere('commodity_code', 'LIKE', '%' . $code . '%')
+                      ->orWhere('url_key', $code)
+                      ->orWhere('url_key', 'LIKE', '%' . $code . '%');
+                })->first();
+
+            if ($hit) {
+                return [$hit->toArray()];
+            }
+        }
+
+        // ── 4. Broad keyword OR search across all text fields ─────────────────
+        $keywords = array_filter(array_merge(
+            (array) ($intent['keywords'] ?? []),
+            !empty($intent['category']) ? [$intent['category']] : [],
+            !empty($intent['brand'])    ? [$intent['brand']]    : []
+        ));
+
+        if (!empty($keywords)) {
+            $broadQuery = (clone $base)->where(function ($q) use ($keywords) {
+                foreach (array_slice($keywords, 0, 6) as $kw) {
+                    $kw = trim($kw);
+                    if (strlen($kw) < 2) {
+                        continue;
+                    }
+                    $like = '%' . $kw . '%';
+                    $q->orWhere('name', 'LIKE', $like)
+                      ->orWhere('description', 'LIKE', $like)
+                      ->orWhere('short_description', 'LIKE', $like)
+                      ->orWhere('categories', 'LIKE', $like)
+                      ->orWhere('category', 'LIKE', $like)
+                      ->orWhere('product_groups', 'LIKE', $like)
+                      ->orWhere('store_model', 'LIKE', $like)
+                      ->orWhere('sub_range', 'LIKE', $like)
+                      ->orWhere('synonym', 'LIKE', $like)
+                      ->orWhere('notes', 'LIKE', $like)
+                      ->orWhere('brand', 'LIKE', $like)
+                      ->orWhereRaw("JSON_SEARCH(`supplier`, 'one', ?) IS NOT NULL", [$like]);
+                }
+            });
+
+            // Narrow by hard attributes if present
+            if (!empty($intent['color'])) {
+                $broadQuery->whereRaw('LOWER(color) LIKE ?', ['%' . strtolower($intent['color']) . '%']);
+            }
+            if (!empty($intent['size'])) {
+                $broadQuery->whereRaw('LOWER(size) = ?', [strtolower($intent['size'])]);
+            }
+
+            $results = $broadQuery->orderByDesc('popularity')->limit(5)->get();
+
+            if ($results->isNotEmpty()) {
+                return $results->toArray();
+            }
+        }
+
+        // ── 5. Attribute-only fallback (no keywords) ──────────────────────────
+        $attrQuery = (clone $base);
 
         if (!empty($intent['brand'])) {
-            $query->whereRaw('LOWER(brand) LIKE ?', ['%' . strtolower($intent['brand']) . '%']);
+            $attrQuery->whereRaw('LOWER(brand) LIKE ?', ['%' . strtolower($intent['brand']) . '%']);
         }
         if (!empty($intent['color'])) {
-            $query->whereRaw('LOWER(color) LIKE ?', ['%' . strtolower($intent['color']) . '%']);
+            $attrQuery->whereRaw('LOWER(color) LIKE ?', ['%' . strtolower($intent['color']) . '%']);
         }
         if (!empty($intent['size'])) {
-            $query->whereRaw('LOWER(size) = ?', [strtolower($intent['size'])]);
+            $attrQuery->whereRaw('LOWER(size) = ?', [strtolower($intent['size'])]);
         }
         if (!empty($intent['category'])) {
-            $query->whereRaw('LOWER(category) LIKE ?', ['%' . strtolower($intent['category']) . '%']);
+            $attrQuery->where(function ($q) use ($intent) {
+                $cat  = strtolower($intent['category']);
+                $like = '%' . $cat . '%';
+                $q->whereRaw('LOWER(category) LIKE ?', [$like])
+                  ->orWhereRaw('LOWER(categories) LIKE ?', [$like])
+                  ->orWhereRaw('LOWER(product_groups) LIKE ?', [$like]);
+            });
         }
 
-        return $query->orderByDesc('popularity')->limit(5)->get()->toArray();
+        return $attrQuery->orderByDesc('popularity')->limit(5)->get()->toArray();
     }
 
     /**

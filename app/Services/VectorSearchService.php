@@ -121,9 +121,9 @@ class VectorSearchService
      */
     private function applySqlFilters(array $intent, string $clientId): Collection
     {
-        $query = Product::whereNotNull('embedding')
-            ->where('in_stock', true)
-            ->where('client_id', $clientId);
+        $query = Product::where('client_id', $clientId)
+            ->whereNotNull('embedding')
+            ->where('is_deleted', false);
 
         // SKU filter (case-insensitive exact match) — kept as a soft fallback here
         // The hard SKU override lives in search() above; this handles edge cases

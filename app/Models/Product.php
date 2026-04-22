@@ -98,15 +98,45 @@ class Product extends Model
     {
         $parts = [
             $this->name,
+            $this->short_description,
             $this->description,
-            $this->category,
             $this->brand,
+            $this->categories ?? $this->category,
+            $this->product_groups,
+            $this->store_model,
+            $this->sub_range,
             $this->color,
             $this->size,
         ];
 
         if (!empty($this->sku)) {
             $parts[] = 'SKU: ' . $this->sku;
+        }
+
+        if (!empty($this->commodity_code)) {
+            $parts[] = 'Commodity: ' . $this->commodity_code;
+        }
+
+        if (!empty($this->synonym)) {
+            $parts[] = 'Also known as: ' . $this->synonym;
+        }
+
+        if (!empty($this->notes)) {
+            $parts[] = $this->notes;
+        }
+
+        if (!empty($this->cross_reference)) {
+            $refs = is_array($this->cross_reference)
+                ? implode(', ', $this->cross_reference)
+                : $this->cross_reference;
+            $parts[] = 'Cross references: ' . $refs;
+        }
+
+        if (!empty($this->supplier)) {
+            $sups = is_array($this->supplier)
+                ? implode(', ', $this->supplier)
+                : $this->supplier;
+            $parts[] = 'Suppliers: ' . $sups;
         }
 
         if (!empty($this->available_sizes)) {
