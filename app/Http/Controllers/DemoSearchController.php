@@ -22,21 +22,11 @@ class DemoSearchController extends Controller
     private const PER_PAGE      = 20;
     private const DEMO_CLIENT   = '00000000-0000-0000-0000-000000000001';
 
-    // Fields that use standard LIKE matching
-    private const LIKE_FIELDS = [
-        'name', 'description', 'short_description', 'notes', 'synonym',
-        'categories', 'product_groups', 'store_model', 'sub_range', 'brand',
-        'category', 'color', 'conind',
-    ];
-
-    // Fields that use exact + LIKE matching
-    private const EXACT_FIELDS = ['sku', 'commodity_code', 'url_key'];
-
-    // JSON array fields: searched with JSON_CONTAINS
-    private const JSON_ARRAY_FIELDS = [
-        'cross_reference', 'cross_reference_syn',
-        'supplier', 'supplier_v2',
-        'related_skus', 'crosssell_skus', 'upsell_skus',
+    // Valid values for the `field` query parameter
+    private const VALID_FIELDS = [
+        'sku', 'url_key', 'name', 'description', 'short_description',
+        'cross_reference', 'suppliers', 'categories', 'attributes',
+        'price', 'rrp_value',
     ];
 
     public function __construct(private readonly AIService $aiService) {}
@@ -189,82 +179,82 @@ PROMPT;
 
     private function applyFullSearch(\Illuminate\Database\Query\Builder $query, string $term, array $intent): void
     {
-        $query->where(function ($q) use ($term, $intent) {
+        $like = '%' . $term . '%';
 
-            // ── Exact/LIKE fields ─────────────────────────────────────────────
-            foreach (self::EXACT_FIELDS as $col) {
-                $q->orWhere($col, $term)
-                  ->orWhere($col, 'LIKE', '%' . $term . '%');
+        $query->where(function ($q) use ($term, $like, $intent) {
+
+            // ── Core text columns (LIKE) ──────────────────────────────────────
+            $q->orWhere('name',              'LIKE', $like)
+              ->orWhere('description',       'LIKE', $like)
+              ->orWhere('short_description', 'LIKE', $like);
+
+            // ── SKU / url_key (exact + LIKE) ──────────────────────────────────
+            $q->orWhere('sku',     $term)
+              ->orWhere('sku',     'LIKE', $like)
+              ->orWhere('url_key', $term)
+              ->orWhere('url_key', 'LIKE', $like);
+
+            // ── JSON multi-value columns ──────────────────────────────────────
+            foreach (['cross_reference', 'suppliers', 'categories'] as $col) {
+                $q->orWhereRaw("JSON_SEARCH(`{$col}`, 'one', ?) IS NOT NULL", [$term])
+                  ->orWhereRaw("JSON_SEARCH(`{$col}`, 'one', ?) IS NOT NULL", [$like]);
             }
 
-            foreach (self::LIKE_FIELDS as $col) {
-                $q->orWhere($col, 'LIKE', '%' . $term . '%');
-            }
+            // ── attributes JSON object (all keys + values) ────────────────────
+            $q->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
 
-            // ── JSON array fields ─────────────────────────────────────────────
-            foreach (self::JSON_ARRAY_FIELDS as $col) {
-                $q->orWhereRaw(
-                    "JSON_SEARCH(`{$col}`, 'one', ?) IS NOT NULL",
-                    [$term]
-                );
-                // Also try partial match inside JSON values
-                $q->orWhereRaw(
-                    "JSON_SEARCH(`{$col}`, 'one', ?) IS NOT NULL",
-                    ['%' . $term . '%']
-                );
-            }
-
-            // ── additional_attributes JSON object (keys + values) ─────────────
-            $q->orWhereRaw("JSON_SEARCH(`additional_attributes`, 'one', ?) IS NOT NULL", ['%' . $term . '%']);
-
-            // ── AI-extracted cross_reference number ───────────────────────────
+            // ── AI-extracted cross_reference / supplier ───────────────────────
             if (! empty($intent['cross_reference'])) {
                 $cr = $intent['cross_reference'];
-                $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$cr])
-                  ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", [$cr]);
+                $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$cr]);
             }
-
-            // ── AI-extracted supplier ─────────────────────────────────────────
             if (! empty($intent['supplier'])) {
                 $sup = '%' . $intent['supplier'] . '%';
-                $q->orWhereRaw("JSON_SEARCH(`supplier`, 'one', ?) IS NOT NULL", [$sup])
-                  ->orWhereRaw("JSON_SEARCH(`supplier_v2`, 'one', ?) IS NOT NULL", [$sup]);
+                $q->orWhereRaw("JSON_SEARCH(`suppliers`, 'one', ?) IS NOT NULL", [$sup]);
             }
 
             // ── Keyword expansion ─────────────────────────────────────────────
-            if (! empty($intent['keywords'])) {
-                foreach (array_slice($intent['keywords'], 0, 4) as $kw) {
-                    $kw = trim($kw);
-                    if (strlen($kw) < 2) {
-                        continue;
-                    }
-                    $q->orWhere('name', 'LIKE', '%' . $kw . '%')
-                      ->orWhere('description', 'LIKE', '%' . $kw . '%')
-                      ->orWhere('categories', 'LIKE', '%' . $kw . '%');
+            foreach (array_slice($intent['keywords'] ?? [], 0, 4) as $kw) {
+                $kw = trim($kw);
+                if (strlen($kw) < 2) {
+                    continue;
                 }
+                $kwLike = '%' . $kw . '%';
+                $q->orWhere('name',        'LIKE', $kwLike)
+                  ->orWhere('description', 'LIKE', $kwLike)
+                  ->orWhereRaw("JSON_SEARCH(`categories`, 'one', ?) IS NOT NULL", [$kwLike])
+                  ->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$kwLike]);
             }
         });
     }
 
     private function applyFieldSearch(\Illuminate\Database\Query\Builder $query, string $field, string $term): void
     {
-        if (in_array($field, self::JSON_ARRAY_FIELDS, true)) {
-            $query->where(function ($q) use ($field, $term) {
+        $like = '%' . $term . '%';
+
+        if ($field === 'attributes') {
+            // Search all keys and values inside the attributes JSON object
+            $query->whereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
+
+        } elseif (in_array($field, ['cross_reference', 'suppliers', 'categories'], true)) {
+            $query->where(function ($q) use ($field, $term, $like) {
                 $q->orWhereRaw("JSON_SEARCH(`{$field}`, 'one', ?) IS NOT NULL", [$term])
-                  ->orWhereRaw("JSON_SEARCH(`{$field}`, 'one', ?) IS NOT NULL", ['%' . $term . '%']);
+                  ->orWhereRaw("JSON_SEARCH(`{$field}`, 'one', ?) IS NOT NULL", [$like]);
             });
 
-        } elseif ($field === 'additional_attributes') {
-            $query->whereRaw("JSON_SEARCH(`additional_attributes`, 'one', ?) IS NOT NULL", ['%' . $term . '%']);
-
-        } elseif (in_array($field, self::EXACT_FIELDS, true)) {
-            $query->where(function ($q) use ($field, $term) {
+        } elseif (in_array($field, ['sku', 'url_key'], true)) {
+            $query->where(function ($q) use ($field, $term, $like) {
                 $q->where($field, $term)
-                  ->orWhere($field, 'LIKE', '%' . $term . '%');
+                  ->orWhere($field, 'LIKE', $like);
             });
+
+        } elseif (in_array($field, ['price', 'rrp_value'], true)) {
+            if (is_numeric($term)) {
+                $query->where($field, (float) $term);
+            }
 
         } else {
-            $query->where($field, 'LIKE', '%' . $term . '%');
+            $query->where($field, 'LIKE', $like);
         }
     }
 
@@ -321,30 +311,22 @@ PROMPT;
     private function selectColumns(): array
     {
         return [
-            'id', 'sku', 'url_key', 'commodity_code', 'name', 'short_description',
-            'description', 'brand', 'categories', 'category', 'product_groups',
-            'store_model', 'sub_range', 'price', 'rrp_value', 'selling_surcharge',
-            'qty', 'in_stock', 'weight_kg', 'is_new', 'new_from_date', 'new_to_date',
-            'cross_reference', 'cross_reference_syn', 'supplier', 'supplier_v2',
-            'additional_attributes', 'related_skus', 'synonym', 'popularity',
-            'image', 'additional_images',
+            'id', 'sku', 'url_key', 'name', 'short_description', 'description',
+            'price', 'rrp_value', 'qty', 'weight_kg',
+            'base_image', 'thumbnail_image',
+            'is_new', 'new_from_date', 'new_to_date',
+            'cross_reference', 'suppliers', 'categories', 'attributes',
+            'popularity',
         ];
     }
 
     private function decodeJsonColumns(array $row): array
     {
-        $jsonFields = [
-            'cross_reference', 'cross_reference_syn', 'supplier', 'supplier_v2',
-            'related_skus', 'additional_attributes', 'additional_images',
-        ];
-
-        foreach ($jsonFields as $field) {
+        foreach (['cross_reference', 'suppliers', 'categories', 'attributes'] as $field) {
             if (isset($row[$field]) && is_string($row[$field])) {
-                $decoded = json_decode($row[$field], true);
-                $row[$field] = $decoded ?? $row[$field];
+                $row[$field] = json_decode($row[$field], true) ?? $row[$field];
             }
         }
-
         return $row;
     }
 }

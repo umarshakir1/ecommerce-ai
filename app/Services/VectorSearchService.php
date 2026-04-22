@@ -125,37 +125,45 @@ class VectorSearchService
             ->whereNotNull('embedding')
             ->where('is_deleted', false);
 
-        // SKU filter (case-insensitive exact match) — kept as a soft fallback here
-        // The hard SKU override lives in search() above; this handles edge cases
+        // SKU filter — exact match (hard override lives in search() above)
         if (!empty($intent['sku'])) {
             $query->whereRaw('UPPER(sku) = ?', [strtoupper($intent['sku'])]);
         }
 
-        // Color filter (case-insensitive partial match)
+        // Color — now stored in attributes JSON
         if (!empty($intent['color'])) {
-            $query->whereRaw('LOWER(color) LIKE ?', ['%' . strtolower($intent['color']) . '%']);
+            $like = '%' . strtolower($intent['color']) . '%';
+            $query->whereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.color'))) LIKE ?", [$like]);
         }
 
-        // Size filter — strict exact match when user specifies a size
+        // Size — now stored in attributes JSON
         if (!empty($intent['size'])) {
-            $query->whereRaw('LOWER(size) = ?', [strtolower($intent['size'])]);
+            $val = strtolower($intent['size']);
+            $query->whereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.size'))) = ?", [$val]);
         }
 
-        // Brand filter (partial match)
+        // Brand — check attributes JSON + suppliers JSON array
         if (!empty($intent['brand'])) {
-            $query->whereRaw('LOWER(brand) LIKE ?', ['%' . strtolower($intent['brand']) . '%']);
+            $like = '%' . strtolower($intent['brand']) . '%';
+            $query->where(function ($q) use ($like) {
+                $q->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.brand'))) LIKE ?", [$like])
+                  ->orWhereRaw("JSON_SEARCH(`suppliers`, 'one', ?) IS NOT NULL", [$like]);
+            });
         }
 
-        // Category filter (partial match — e.g. "casual" matches "casual wear")
+        // Category — check categories JSON array + attributes JSON
         if (!empty($intent['category'])) {
-            $query->whereRaw('LOWER(category) LIKE ?', ['%' . strtolower($intent['category']) . '%']);
+            $like = '%' . strtolower($intent['category']) . '%';
+            $query->where(function ($q) use ($like) {
+                $q->orWhereRaw("JSON_SEARCH(`categories`, 'one', ?) IS NOT NULL", [$like])
+                  ->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
+            });
         }
 
-        // Price range filter
+        // Price range filter (price is still a core column)
         if (!empty($intent['price_range'])) {
             $min = $intent['price_range']['min'] ?? null;
             $max = $intent['price_range']['max'] ?? null;
-
             if ($min !== null) {
                 $query->where('price', '>=', (float) $min);
             }

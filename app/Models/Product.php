@@ -12,65 +12,44 @@ class Product extends Model
     protected $fillable = [
         // Multi-tenancy
         'client_id',
-        // Identification
-        'sku', 'url_key', 'commodity_code',
+        // Core identification
+        'sku', 'url_key',
         // Core text
-        'name', 'description', 'short_description', 'notes', 'synonym', 'conind',
-        // Categorisation
-        'brand', 'category', 'categories', 'product_groups', 'store_model', 'sub_range',
-        // Variants (chat-compat)
-        'color', 'available_colors', 'size', 'available_sizes', 'image',
-        // Pricing
-        'price', 'rrp_value', 'selling_surcharge',
-        // Inventory
-        'qty', 'allow_backorders', 'website_id', 'in_stock',
-        // Physical
-        'weight_kg', 'package_width', 'package_depth', 'package_length',
-        // Flags
-        'is_deleted', 'is_updated', 'is_new', 'is_images_updated',
-        // Dates
-        'new_from_date', 'new_to_date',
-        // JSON multi-value
-        'tags', 'cross_reference', 'cross_reference_syn',
-        'supplier', 'supplier_v2', 'additional_attributes',
-        'related_skus', 'crosssell_skus', 'upsell_skus', 'additional_images',
+        'name', 'description', 'short_description',
+        // Core pricing
+        'price', 'rrp_value',
+        // Core inventory
+        'qty',
+        // Core physical
+        'weight_kg',
+        // Core media
+        'base_image', 'thumbnail_image',
+        // Core status / dates
+        'is_deleted', 'is_new', 'new_from_date', 'new_to_date',
+        // JSON multi-value (first-class search targets)
+        'cross_reference', 'suppliers', 'categories',
+        // Platform-specific attributes catchall
+        'attributes',
         // AI / RAG
         'embedding', 'popularity',
     ];
 
     protected $casts = [
         // JSON arrays
-        'tags'                => 'array',
-        'available_sizes'     => 'array',
-        'available_colors'    => 'array',
-        'cross_reference'     => 'array',
-        'cross_reference_syn' => 'array',
-        'supplier'            => 'array',
-        'supplier_v2'         => 'array',
-        'related_skus'        => 'array',
-        'crosssell_skus'      => 'array',
-        'upsell_skus'         => 'array',
-        'additional_images'   => 'array',
-        // JSON object
-        'additional_attributes' => 'array',
+        'cross_reference' => 'array',
+        'suppliers'       => 'array',
+        'categories'      => 'array',
+        // JSON object (platform-specific attributes)
+        'attributes'      => 'array',
         // Numerics
-        'price'            => 'float',
-        'rrp_value'        => 'float',
-        'selling_surcharge' => 'float',
-        'weight_kg'        => 'float',
-        'package_width'    => 'float',
-        'package_depth'    => 'float',
-        'package_length'   => 'float',
-        'qty'              => 'integer',
-        'allow_backorders' => 'integer',
-        'website_id'       => 'integer',
-        'popularity'       => 'integer',
+        'price'      => 'float',
+        'rrp_value'  => 'float',
+        'weight_kg'  => 'float',
+        'qty'        => 'integer',
+        'popularity' => 'integer',
         // Booleans
-        'in_stock'          => 'boolean',
-        'is_deleted'        => 'boolean',
-        'is_updated'        => 'boolean',
-        'is_new'            => 'boolean',
-        'is_images_updated' => 'boolean',
+        'is_deleted' => 'boolean',
+        'is_new'     => 'boolean',
         // Dates
         'new_from_date' => 'date',
         'new_to_date'   => 'date',
@@ -96,35 +75,35 @@ class Product extends Model
      */
     public function getEmbeddingText(): string
     {
+        $attrs = (array) ($this->getAttribute('attributes') ?? []);
+
         $parts = [
             $this->name,
             $this->short_description,
             $this->description,
-            $this->brand,
-            $this->categories ?? $this->category,
-            $this->product_groups,
-            $this->store_model,
-            $this->sub_range,
-            $this->color,
-            $this->size,
         ];
 
         if (!empty($this->sku)) {
             $parts[] = 'SKU: ' . $this->sku;
         }
 
-        if (!empty($this->commodity_code)) {
-            $parts[] = 'Commodity: ' . $this->commodity_code;
+        // Categories JSON array
+        if (!empty($this->categories)) {
+            $cats = is_array($this->categories)
+                ? implode(', ', $this->categories)
+                : $this->categories;
+            $parts[] = $cats;
         }
 
-        if (!empty($this->synonym)) {
-            $parts[] = 'Also known as: ' . $this->synonym;
+        // Suppliers JSON array
+        if (!empty($this->suppliers)) {
+            $sups = is_array($this->suppliers)
+                ? implode(', ', $this->suppliers)
+                : $this->suppliers;
+            $parts[] = 'Suppliers: ' . $sups;
         }
 
-        if (!empty($this->notes)) {
-            $parts[] = $this->notes;
-        }
-
+        // Cross-reference JSON array
         if (!empty($this->cross_reference)) {
             $refs = is_array($this->cross_reference)
                 ? implode(', ', $this->cross_reference)
@@ -132,23 +111,11 @@ class Product extends Model
             $parts[] = 'Cross references: ' . $refs;
         }
 
-        if (!empty($this->supplier)) {
-            $sups = is_array($this->supplier)
-                ? implode(', ', $this->supplier)
-                : $this->supplier;
-            $parts[] = 'Suppliers: ' . $sups;
-        }
-
-        if (!empty($this->available_sizes)) {
-            $parts[] = 'Available sizes: ' . implode(', ', $this->available_sizes);
-        }
-
-        if (!empty($this->available_colors)) {
-            $parts[] = 'Available colors: ' . implode(', ', $this->available_colors);
-        }
-
-        if (!empty($this->tags)) {
-            $parts[] = implode(' ', $this->tags);
+        // From attributes JSON: fields valuable for semantic search
+        foreach (['brand', 'commodity_code', 'synonym', 'notes', 'product_groups', 'store_model', 'sub_range', 'color', 'size'] as $key) {
+            if (!empty($attrs[$key]) && is_string($attrs[$key])) {
+                $parts[] = $attrs[$key];
+            }
         }
 
         return implode('. ', array_filter($parts));

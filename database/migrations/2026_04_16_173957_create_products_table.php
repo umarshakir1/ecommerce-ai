@@ -15,72 +15,45 @@ return new class extends Migration
             // ── Multi-tenancy ─────────────────────────────────────────────────
             $table->string('client_id')->default('')->index();
 
-            // ── Identification ────────────────────────────────────────────────
+            // ── Core identification (exists on every platform) ────────────────
             $table->string('sku')->nullable()->index();
             $table->string('url_key')->nullable()->index();
-            $table->string('commodity_code')->nullable()->index();
 
-            // ── Core text (used by chat RAG + fulltext search) ────────────────
-            $table->text('name')->nullable();
-            $table->text('description')->nullable();
+            // ── Core text ────────────────────────────────────────────────────
+            $table->string('name')->nullable()->index();
+            $table->longText('description')->nullable();
             $table->text('short_description')->nullable();
-            $table->text('notes')->nullable();
-            $table->text('synonym')->nullable();
-            $table->string('conind')->nullable();
 
-            // ── Categorisation ────────────────────────────────────────────────
-            $table->string('brand')->nullable();
-            $table->string('category')->nullable();      // chat-compat alias
-            $table->string('categories')->nullable();    // CSV: pipe/comma list
-            $table->string('product_groups')->nullable();
-            $table->string('store_model')->nullable();
-            $table->string('sub_range')->nullable();
-
-            // ── Variants (chat-compat) ─────────────────────────────────────────
-            $table->string('color')->nullable();
-            $table->json('available_colors')->nullable();
-            $table->string('size')->nullable();
-            $table->json('available_sizes')->nullable();
-            $table->string('image')->nullable();
-
-            // ── Pricing ───────────────────────────────────────────────────────
+            // ── Core pricing ──────────────────────────────────────────────────
             $table->decimal('price', 10, 2)->nullable();
             $table->decimal('rrp_value', 10, 2)->nullable();
-            $table->decimal('selling_surcharge', 10, 2)->nullable();
 
-            // ── Inventory ─────────────────────────────────────────────────────
-            $table->integer('qty')->nullable();
-            $table->integer('allow_backorders')->nullable();
-            $table->integer('website_id')->nullable();
-            $table->boolean('in_stock')->default(true);
+            // ── Core inventory ────────────────────────────────────────────────
+            $table->integer('qty')->default(0);
 
-            // ── Physical dimensions ───────────────────────────────────────────
+            // ── Core physical ─────────────────────────────────────────────────
             $table->float('weight_kg')->nullable();
-            $table->float('package_width')->nullable();
-            $table->float('package_depth')->nullable();
-            $table->float('package_length')->nullable();
 
-            // ── Status flags ──────────────────────────────────────────────────
+            // ── Core media ────────────────────────────────────────────────────
+            $table->string('base_image')->nullable();
+            $table->string('thumbnail_image')->nullable();
+
+            // ── Core status / dates ───────────────────────────────────────────
             $table->boolean('is_deleted')->default(false);
-            $table->boolean('is_updated')->default(false);
             $table->boolean('is_new')->default(false);
-            $table->boolean('is_images_updated')->default(false);
-
-            // ── Dates ─────────────────────────────────────────────────────────
             $table->date('new_from_date')->nullable();
             $table->date('new_to_date')->nullable();
 
-            // ── JSON multi-value fields ───────────────────────────────────────
-            $table->json('tags')->nullable();
-            $table->json('cross_reference')->nullable();
-            $table->json('cross_reference_syn')->nullable();
-            $table->json('supplier')->nullable();
-            $table->json('supplier_v2')->nullable();
-            $table->json('additional_attributes')->nullable();
-            $table->json('related_skus')->nullable();
-            $table->json('crosssell_skus')->nullable();
-            $table->json('upsell_skus')->nullable();
-            $table->json('additional_images')->nullable();
+            // ── JSON multi-value (first-class search targets) ─────────────────
+            $table->json('cross_reference')->nullable(); // merged cross_reference + cross_reference_syn
+            $table->json('suppliers')->nullable();       // merged supplier + supplier_v2
+            $table->json('categories')->nullable();      // categories + product_groups + store_model + sub_range
+
+            // ── Platform-specific / product-specific attributes ───────────────
+            // Everything else lives here: brand, commodity_code, synonym, notes,
+            // dimensions, flags, related SKUs, additional images, parsed
+            // additional_attributes key-value pairs, etc.
+            $table->json('attributes')->nullable();
 
             // ── AI / RAG ──────────────────────────────────────────────────────
             $table->longText('embedding')->nullable();
@@ -89,10 +62,8 @@ return new class extends Migration
             $table->timestamps();
         });
 
-        // Fulltext index — must use DB::statement for TEXT column support
-        DB::statement('ALTER TABLE products ADD FULLTEXT INDEX products_fulltext_idx
-            (name, description, short_description, sku, synonym, commodity_code,
-             url_key, conind, categories, product_groups, store_model, sub_range)');
+        DB::statement('ALTER TABLE products ADD FULLTEXT INDEX products_ft_idx
+            (name, description, short_description, sku, url_key)');
     }
 
     public function down(): void

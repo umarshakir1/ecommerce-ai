@@ -14,29 +14,10 @@ class DemoProductSeeder extends Seeder
     private const MAX_ROWS    = 10000;
     private const CLIENT_ID   = '00000000-0000-0000-0000-000000000001';
 
-    // ── JSON array fields (split by comma) ────────────────────────────────────
-    private const COMMA_JSON = [
-        'cross_reference', 'cross_reference_syn',
-        'related_skus', 'crosssell_skus', 'upsell_skus', 'additional_images',
-    ];
-
-    // ── JSON array fields (split by pipe and deduplicated) ────────────────────
-    private const PIPE_JSON = ['supplier', 'supplier_v2'];
-
-    // ── Decimal fields ────────────────────────────────────────────────────────
-    private const DECIMAL_FIELDS = ['price', 'rrp_value', 'selling_surcharge'];
-
-    // ── Float fields ──────────────────────────────────────────────────────────
-    private const FLOAT_FIELDS = ['weight_kg', 'package_width', 'package_depth', 'package_length'];
-
-    // ── Integer fields ────────────────────────────────────────────────────────
-    private const INT_FIELDS = ['qty', 'allow_backorders', 'website_id'];
-
-    // ── Boolean flags ─────────────────────────────────────────────────────────
-    private const BOOL_FIELDS = ['is_deleted', 'is_updated', 'is_new', 'is_images_updated'];
-
-    // ── Date fields ───────────────────────────────────────────────────────────
-    private const DATE_FIELDS = ['new_from_date', 'new_to_date'];
+    // ── Core columns that map directly from CSV ───────────────────────────────
+    private const CORE_STRING = ['sku', 'url_key', 'name', 'description', 'short_description'];
+    private const CORE_DECIMAL = ['price', 'rrp_value'];
+    private const CORE_DATE   = ['new_from_date', 'new_to_date'];
 
     public function run(): void
     {
@@ -104,7 +85,7 @@ class DemoProductSeeder extends Seeder
             $data = array_combine($headers, $row);
 
             // ── Skip deleted rows ─────────────────────────────────────────────
-            if ($this->parseBool($data['is_deleted'] ?? null)) {
+            if ($this->bool($data['is_deleted'] ?? null)) {
                 $skipped++;
                 continue;
             }
@@ -155,85 +136,130 @@ class DemoProductSeeder extends Seeder
             'updated_at' => $now,
         ];
 
-        // ── String fields (direct copy) ───────────────────────────────────────
-        $stringFields = [
-            'sku', 'url_key', 'commodity_code', 'name', 'description',
-            'short_description', 'notes', 'synonym', 'conind', 'brand',
-            'category', 'categories', 'product_groups', 'store_model',
-            'sub_range', 'color', 'size', 'image',
-        ];
-
-        foreach ($stringFields as $field) {
-            $row[$field] = $this->nullableString($data[$field] ?? null);
+        // ── Core string fields ────────────────────────────────────────────────
+        foreach (self::CORE_STRING as $field) {
+            $row[$field] = $this->str($data[$field] ?? null);
         }
 
-        // ── Decimal fields ────────────────────────────────────────────────────
-        foreach (self::DECIMAL_FIELDS as $field) {
-            $val = $this->nullableString($data[$field] ?? null);
-            $row[$field] = ($val !== null && is_numeric($val)) ? (float) $val : null;
+        // ── Core decimal fields ───────────────────────────────────────────────
+        foreach (self::CORE_DECIMAL as $field) {
+            $v = $this->str($data[$field] ?? null);
+            $row[$field] = ($v !== null && is_numeric($v)) ? (float) $v : null;
         }
 
-        // ── Float fields ──────────────────────────────────────────────────────
-        foreach (self::FLOAT_FIELDS as $field) {
-            $val = $this->nullableString($data[$field] ?? null);
-            $row[$field] = ($val !== null && is_numeric($val)) ? (float) $val : null;
+        // ── Core integer: qty ─────────────────────────────────────────────────
+        $v = $this->str($data['qty'] ?? null);
+        $row['qty'] = ($v !== null && is_numeric($v)) ? (int) $v : 0;
+
+        // ── Core float: weight_kg ─────────────────────────────────────────────
+        $v = $this->str($data['weight_kg'] ?? null);
+        $row['weight_kg'] = ($v !== null && is_numeric($v)) ? (float) $v : null;
+
+        // ── Core media ────────────────────────────────────────────────────────
+        $row['base_image']       = $this->str($data['base_image'] ?? $data['image'] ?? null);
+        $row['thumbnail_image']  = $this->str($data['thumbnail_image'] ?? $data['small_image'] ?? null);
+
+        // ── Core boolean flags ────────────────────────────────────────────────
+        $row['is_deleted'] = $this->bool($data['is_deleted'] ?? null) ? 1 : 0;
+        $row['is_new']     = $this->bool($data['is_new'] ?? null) ? 1 : 0;
+
+        // ── Core dates ────────────────────────────────────────────────────────
+        foreach (self::CORE_DATE as $field) {
+            $row[$field] = $this->parseDate($this->str($data[$field] ?? null));
         }
 
-        // ── Integer fields ────────────────────────────────────────────────────
-        foreach (self::INT_FIELDS as $field) {
-            $val = $this->nullableString($data[$field] ?? null);
-            $row[$field] = ($val !== null && is_numeric($val)) ? (int) $val : null;
-        }
+        // ── cross_reference: merge cross_reference + cross_reference_syn ──────
+        $crMerged = array_values(array_unique(array_filter(array_merge(
+            $this->splitArr($data['cross_reference']     ?? null, ','),
+            $this->splitArr($data['cross_reference_syn'] ?? null, ',')
+        ))));
+        $row['cross_reference'] = empty($crMerged) ? null : json_encode($crMerged);
 
-        // ── Boolean flags ─────────────────────────────────────────────────────
-        foreach (self::BOOL_FIELDS as $field) {
-            $row[$field] = $this->parseBool($data[$field] ?? null) ? 1 : 0;
-        }
+        // ── suppliers: merge supplier + supplier_v2 (pipe-delimited) ──────────
+        $supMerged = array_values(array_unique(array_filter(array_merge(
+            $this->splitArr($data['supplier']    ?? null, '|'),
+            $this->splitArr($data['supplier_v2'] ?? null, '|')
+        ))));
+        $row['suppliers'] = empty($supMerged) ? null : json_encode($supMerged);
 
-        // ── in_stock (derive from qty / explicit field) ───────────────────────
-        if (isset($data['in_stock'])) {
-            $row['in_stock'] = $this->parseBool($data['in_stock']) ? 1 : 1;
-        } else {
-            $qty = $row['qty'] ?? null;
-            $row['in_stock'] = ($qty === null || $qty > 0) ? 1 : 0;
-        }
-
-        // ── Date fields ───────────────────────────────────────────────────────
-        foreach (self::DATE_FIELDS as $field) {
-            $val = $this->nullableString($data[$field] ?? null);
-            $row[$field] = $this->parseDate($val);
-        }
-
-        // ── Comma-split JSON arrays ───────────────────────────────────────────
-        foreach (self::COMMA_JSON as $field) {
-            $row[$field] = $this->splitToJson($data[$field] ?? null, ',');
-        }
-
-        // ── Pipe-split JSON arrays (deduplicated) ─────────────────────────────
-        foreach (self::PIPE_JSON as $field) {
-            $row[$field] = $this->splitToJson($data[$field] ?? null, '|', dedupe: true);
-        }
-
-        // ── additional_attributes: "key=value,key=value" → JSON object ────────
-        $row['additional_attributes'] = $this->parseAdditionalAttributes(
-            $data['additional_attributes'] ?? null
+        // ── categories: categories (comma) + product_groups + store_model + sub_range
+        $catParts = array_merge(
+            $this->splitArr($data['categories'] ?? null, ','),
+            array_filter([
+                $this->str($data['product_groups'] ?? null),
+                $this->str($data['store_model']    ?? null),
+                $this->str($data['sub_range']      ?? null),
+            ])
         );
+        $catMerged = array_values(array_unique(array_filter($catParts)));
+        $row['categories'] = empty($catMerged) ? null : json_encode($catMerged);
 
-        // ── Defaults for chat-compat fields not in CSV ─────────────────────────
-        $row['popularity']       = isset($data['popularity']) && is_numeric($data['popularity'])
-            ? (int) $data['popularity']
-            : 0;
-        $row['embedding']        = null;
-        $row['tags']             = null;
-        $row['available_sizes']  = null;
-        $row['available_colors'] = null;
+        // ── attributes: everything platform/product-specific ──────────────────
+        $attrs = [];
+
+        // Scalar attribute fields
+        $scalarAttrs = [
+            'brand', 'color', 'size', 'category', 'commodity_code',
+            'attribute_set_code', 'product_groups', 'store_model', 'sub_range',
+            'conind', 'synonym', 'notes', 'superto', 'dd', 'brake_chamber_filter',
+        ];
+        foreach ($scalarAttrs as $field) {
+            $v = $this->str($data[$field] ?? null);
+            if ($v !== null) {
+                $attrs[$field] = $v;
+            }
+        }
+
+        // Numeric attribute fields
+        $numericAttrs = [
+            'selling_surcharge' => 'float',
+            'package_width'     => 'float',
+            'package_depth'     => 'float',
+            'package_length'    => 'float',
+            'allow_backorders'  => 'int',
+            'website_id'        => 'int',
+        ];
+        foreach ($numericAttrs as $field => $type) {
+            $v = $this->str($data[$field] ?? null);
+            if ($v !== null && is_numeric($v)) {
+                $attrs[$field] = $type === 'int' ? (int) $v : (float) $v;
+            }
+        }
+
+        // Boolean attribute fields
+        foreach (['is_updated', 'is_images_updated'] as $field) {
+            if (isset($data[$field]) && $this->str($data[$field]) !== null) {
+                $attrs[$field] = $this->bool($data[$field]) ? 1 : 0;
+            }
+        }
+
+        // Array attribute fields (comma-split)
+        foreach (['related_skus', 'crosssell_skus', 'upsell_skus', 'additional_images'] as $field) {
+            $arr = $this->splitArr($data[$field] ?? null, ',');
+            if (! empty($arr)) {
+                $attrs[$field] = $arr;
+            }
+        }
+
+        // Merge parsed additional_attributes key=value pairs into attrs
+        $parsed = $this->parseAdditionalAttributes($data['additional_attributes'] ?? null);
+        if (! empty($parsed)) {
+            $attrs = array_merge($parsed, $attrs); // CSV attrs override parsed so explicit wins
+        }
+
+        $row['attributes'] = empty($attrs) ? null : json_encode($attrs);
+
+        // ── AI / RAG defaults ─────────────────────────────────────────────────
+        $v = $data['popularity'] ?? null;
+        $row['popularity'] = ($v !== null && is_numeric($v)) ? (int) $v : 0;
+        $row['embedding']  = null;
 
         return $row;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private function nullableString(?string $value): ?string
+    private function str(?string $value): ?string
     {
         if ($value === null || trim($value) === '') {
             return null;
@@ -241,70 +267,49 @@ class DemoProductSeeder extends Seeder
         return trim($value);
     }
 
-    private function parseBool(?string $value): bool
+    private function bool(?string $value): bool
     {
-        if ($value === null) {
-            return false;
-        }
-        return in_array(strtolower(trim($value)), ['1', 'true', 'yes', 'y'], true);
+        return in_array(strtolower(trim((string) $value)), ['1', 'true', 'yes', 'y'], true);
     }
 
     private function parseDate(?string $value): ?string
     {
-        if ($value === null || trim($value) === '') {
+        if ($value === null) {
             return null;
         }
         try {
-            return \Carbon\Carbon::parse(trim($value))->toDateString();
+            return \Carbon\Carbon::parse($value)->toDateString();
         } catch (\Throwable) {
             return null;
         }
     }
 
-    private function splitToJson(?string $value, string $delimiter, bool $dedupe = false): ?string
+    private function splitArr(?string $value, string $delimiter): array
     {
         if ($value === null || trim($value) === '') {
-            return null;
+            return [];
         }
-
-        $parts = array_map('trim', explode($delimiter, $value));
-        $parts = array_filter($parts, fn ($p) => $p !== '');
-        $parts = array_values($parts);
-
-        if ($dedupe) {
-            $parts = array_values(array_unique($parts));
-        }
-
-        return empty($parts) ? null : json_encode($parts);
+        return array_values(array_filter(array_map('trim', explode($delimiter, $value))));
     }
 
-    private function parseAdditionalAttributes(?string $value): ?string
+    private function parseAdditionalAttributes(?string $value): array
     {
         if ($value === null || trim($value) === '') {
-            return null;
+            return [];
         }
-
         $result = [];
-
         foreach (explode(',', $value) as $pair) {
-            $pair = trim($pair);
-            if ($pair === '') {
-                continue;
-            }
-
+            $pair  = trim($pair);
             $eqPos = strpos($pair, '=');
-            if ($eqPos === false) {
+            if ($eqPos === false || $eqPos === 0) {
                 continue;
             }
-
-            $key   = trim(substr($pair, 0, $eqPos));
-            $val   = trim(substr($pair, $eqPos + 1));
-
+            $key = trim(substr($pair, 0, $eqPos));
+            $val = trim(substr($pair, $eqPos + 1));
             if ($key !== '') {
-                $result[$key] = $val;
+                $result[$key] = $val !== '' ? $val : null;
             }
         }
-
-        return empty($result) ? null : json_encode($result);
+        return $result;
     }
 }

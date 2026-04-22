@@ -129,7 +129,7 @@ class ChatController extends Controller
 
             // Fallback: pure SQL filter when embedding is unavailable
             if (empty($products)) {
-                $products = $this->fallbackSqlSearch($intent, $clientId);
+                $products = $this->fallbackSqlSearch($intent, $clientId, $userMessage);
             }
 
             // 5e. Generate RAG response — full history gives the AI awareness
@@ -460,13 +460,15 @@ class ChatController extends Controller
 
     /**
      * Fallback search using pure SQL when no embedding is available.
-     * Searches across ALL relevant fields in priority order:
-     *   1. SKU exact → SKU LIKE
-     *   2. cross_reference / cross_reference_syn JSON array contains
-     *   3. commodity_code exact → LIKE
-     *   4. Broad OR across name, description, categories, synonym, notes + keywords
-     *   5. Attribute filters (brand, color, size, category) as refinement
-     * ALWAYS scoped to client_id — no cross-tenant access.
+     * New universal schema: core columns + cross_reference/suppliers/categories JSON + attributes JSON.
+     * Search priority:
+     *   0. Extract numeric/part codes from raw message directly
+     *   1. SKU exact → LIKE
+     *   2. cross_reference JSON → suppliers JSON
+     *   3. url_key LIKE
+     *   4. Broad OR: name/description LIKE + categories/suppliers JSON + attributes JSON_SEARCH
+     *   5. Attribute-only: brand/category/supplier from attributes/categories JSON
+     * ALWAYS scoped to client_id.
      */
     private function fallbackSqlSearch(array $intent, string $clientId, string $rawQuery = ''): array
     {
@@ -517,9 +519,9 @@ class ChatController extends Controller
             $like = '%' . $cr . '%';
             $hits = (clone $base)->where(function ($q) use ($cr, $like) {
                 $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$cr])
-                  ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", [$cr])
                   ->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$like])
-                  ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", [$like]);
+                  ->orWhereRaw("JSON_SEARCH(`suppliers`,       'one', ?) IS NOT NULL", [$cr])
+                  ->orWhereRaw("JSON_SEARCH(`suppliers`,       'one', ?) IS NOT NULL", [$like]);
             })->limit(5)->get();
 
             if ($hits->isNotEmpty()) {
@@ -527,12 +529,10 @@ class ChatController extends Controller
             }
         }
 
-        // ── 3. commodity_code / url_key (intent + raw codes) ──────────────────
+        // ── 3. url_key exact + LIKE (intent + raw codes) ─────────────────────
         foreach ($crCandidates as $code) {
             $hit = (clone $base)->where(function ($q) use ($code) {
-                $q->where('commodity_code', $code)
-                  ->orWhere('commodity_code', 'LIKE', '%' . $code . '%')
-                  ->orWhere('url_key', $code)
+                $q->where('url_key', $code)
                   ->orWhere('url_key', 'LIKE', '%' . $code . '%');
             })->first();
 
@@ -541,7 +541,7 @@ class ChatController extends Controller
             }
         }
 
-        // ── 4. Broad keyword OR search across all text + sku + cross_ref ──────
+        // ── 4. Broad keyword OR search: text + JSON columns + attributes ─────
         $keywords = array_unique(array_filter(array_merge(
             (array) ($intent['keywords'] ?? []),
             !empty($intent['category']) ? [$intent['category']] : [],
@@ -557,30 +557,19 @@ class ChatController extends Controller
                         continue;
                     }
                     $like = '%' . $kw . '%';
-                    $q->orWhere('name', 'LIKE', $like)
-                      ->orWhere('description', 'LIKE', $like)
+                    // Core text columns
+                    $q->orWhere('name',              'LIKE', $like)
+                      ->orWhere('description',       'LIKE', $like)
                       ->orWhere('short_description', 'LIKE', $like)
-                      ->orWhere('categories', 'LIKE', $like)
-                      ->orWhere('category', 'LIKE', $like)
-                      ->orWhere('product_groups', 'LIKE', $like)
-                      ->orWhere('store_model', 'LIKE', $like)
-                      ->orWhere('sub_range', 'LIKE', $like)
-                      ->orWhere('synonym', 'LIKE', $like)
-                      ->orWhere('notes', 'LIKE', $like)
-                      ->orWhere('brand', 'LIKE', $like)
-                      ->orWhere('sku', 'LIKE', $like)
-                      ->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$like])
-                      ->orWhereRaw("JSON_SEARCH(`cross_reference_syn`, 'one', ?) IS NOT NULL", [$like])
-                      ->orWhereRaw("JSON_SEARCH(`supplier`, 'one', ?) IS NOT NULL", [$like]);
+                      ->orWhere('sku',               'LIKE', $like);
+                    // JSON multi-value columns
+                    $q->orWhereRaw("JSON_SEARCH(`cross_reference`, 'one', ?) IS NOT NULL", [$like])
+                      ->orWhereRaw("JSON_SEARCH(`suppliers`,       'one', ?) IS NOT NULL", [$like])
+                      ->orWhereRaw("JSON_SEARCH(`categories`,      'one', ?) IS NOT NULL", [$like]);
+                    // attributes JSON object: brand, synonym, notes, commodity_code, etc.
+                    $q->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
                 }
             });
-
-            if (!empty($intent['color'])) {
-                $broadQuery->whereRaw('LOWER(color) LIKE ?', ['%' . strtolower($intent['color']) . '%']);
-            }
-            if (!empty($intent['size'])) {
-                $broadQuery->whereRaw('LOWER(size) = ?', [strtolower($intent['size'])]);
-            }
 
             $results = $broadQuery->orderByDesc('popularity')->limit(5)->get();
 
@@ -589,32 +578,36 @@ class ChatController extends Controller
             }
         }
 
-        // ── 5. Attribute-only fallback (no keywords, no codes) ────────────────
+        // ── 5. Attribute-only fallback (brand/category/supplier from JSON) ─────
         $hasAttribute = !empty($intent['brand']) || !empty($intent['color'])
             || !empty($intent['size'])  || !empty($intent['category']);
 
         if (! $hasAttribute) {
-            return []; // Nothing meaningful to filter on — return empty rather than top-5 noise
+            return []; // Nothing to filter on — return empty rather than top-5 noise
         }
 
         $attrQuery = (clone $base);
 
         if (!empty($intent['brand'])) {
-            $attrQuery->whereRaw('LOWER(brand) LIKE ?', ['%' . strtolower($intent['brand']) . '%']);
+            $like = '%' . strtolower($intent['brand']) . '%';
+            $attrQuery->where(function ($q) use ($like) {
+                $q->orWhereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.brand'))) LIKE ?", [$like])
+                  ->orWhereRaw("JSON_SEARCH(`suppliers`, 'one', ?) IS NOT NULL", [$like]);
+            });
         }
         if (!empty($intent['color'])) {
-            $attrQuery->whereRaw('LOWER(color) LIKE ?', ['%' . strtolower($intent['color']) . '%']);
+            $like = '%' . strtolower($intent['color']) . '%';
+            $attrQuery->whereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.color'))) LIKE ?", [$like]);
         }
         if (!empty($intent['size'])) {
-            $attrQuery->whereRaw('LOWER(size) = ?', [strtolower($intent['size'])]);
+            $val = strtolower($intent['size']);
+            $attrQuery->whereRaw("LOWER(JSON_UNQUOTE(JSON_EXTRACT(`attributes`, '\$.size'))) = ?", [$val]);
         }
         if (!empty($intent['category'])) {
-            $attrQuery->where(function ($q) use ($intent) {
-                $cat  = strtolower($intent['category']);
-                $like = '%' . $cat . '%';
-                $q->whereRaw('LOWER(category) LIKE ?', [$like])
-                  ->orWhereRaw('LOWER(categories) LIKE ?', [$like])
-                  ->orWhereRaw('LOWER(product_groups) LIKE ?', [$like]);
+            $like = '%' . strtolower($intent['category']) . '%';
+            $attrQuery->where(function ($q) use ($like) {
+                $q->orWhereRaw("JSON_SEARCH(`categories`, 'one', ?) IS NOT NULL", [$like])
+                  ->orWhereRaw("JSON_SEARCH(`attributes`, 'all', ?) IS NOT NULL", [$like]);
             });
         }
 
