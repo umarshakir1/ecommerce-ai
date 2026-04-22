@@ -565,21 +565,59 @@ class ChatController extends Controller
     }
 
     /**
-     * Detect simple greetings locally without an API call.
-     * Returns 'greeting' if matched, null otherwise.
+     * Detect non-shopping intents locally before calling the API.
+     * Returns an intent string if matched, null to let the API decide.
      */
     private function detectGreetingLocally(string $message): ?string
     {
-        $clean = strtolower(trim(preg_replace('/[^a-z\s]/i', '', $message)));
+        $clean = strtolower(trim(preg_replace('/[^a-z\s\']/i', ' ', $message)));
+        $clean = preg_replace('/\s+/', ' ', $clean);
+        $words = array_filter(explode(' ', $clean));
 
+        // ── Greetings ────────────────────────────────────────────────────────
         $greetings = [
             'hi', 'hello', 'hey', 'salam', 'howdy', 'greetings',
             'good morning', 'good evening', 'good afternoon', 'good day',
-            'hi there', 'hey there', 'hello there', 'what\'s up', 'whats up',
-            'assalam', 'assalamualaikum', 'salaam',
+            'hi there', 'hey there', 'hello there', 'whats up', 'what\'s up',
+            'assalam', 'assalamualaikum', 'salaam', 'yo', 'sup',
         ];
+        if (in_array($clean, $greetings, true)) {
+            return 'greeting';
+        }
 
-        return in_array($clean, $greetings, true) ? 'greeting' : null;
+        // ── If message contains shopping signals, let API classify ────────────
+        $shoppingSignals = [
+            'buy', 'shirt', 'hoodie', 'jacket', 'jeans', 'pants', 'shoes',
+            'sneakers', 'clothes', 'clothing', 'outfit', 'wear', 'dress',
+            'suit', 'blazer', 'coat', 'hat', 'cap', 'bag', 'wallet', 'belt',
+            'size', 'color', 'colour', 'price', 'cheap', 'brand', 'fashion',
+            'casual', 'formal', 'style', 'fabric', 'material', 'scarf',
+            'recommend', 'suggestion', 'find me', 'looking for', 'want a',
+            'need a', 'budget', 'affordable', 'expensive',
+        ];
+        foreach ($shoppingSignals as $signal) {
+            if (str_contains($clean, $signal)) {
+                return null;
+            }
+        }
+
+        // ── Clearly unrelated topics → redirect politely ──────────────────────
+        $unrelatedSignals = [
+            'cook', 'cooking', 'recipe', 'food', 'biryani', 'pizza', 'burger',
+            'weather', 'temperature', 'rain', 'sunny', 'forecast',
+            'football', 'cricket', 'sports', 'game', 'match', 'score',
+            'movie', 'film', 'song', 'music', 'news', 'politics',
+            'code', 'programming', 'software', 'math', 'science',
+            'joke', 'funny', 'laugh', 'how are you', 'how r you',
+            'what is your name', 'who are you', 'what can you do',
+        ];
+        foreach ($unrelatedSignals as $signal) {
+            if (str_contains($clean, $signal)) {
+                return 'unrelated';
+            }
+        }
+
+        return null;
     }
 
     /**
