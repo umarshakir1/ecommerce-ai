@@ -40,13 +40,7 @@ class DemoProductSeeder extends Seeder
 
     public function run(): void
     {
-        if (! file_exists(self::CSV_PATH)) {
-            $this->command->error('CSV not found: ' . self::CSV_PATH);
-            $this->command->error('Place eCommerceMaster.csv in database/seeders/data/ and re-run.');
-            return;
-        }
-
-        // ── Ensure demo user exists ───────────────────────────────────────────
+        // ── Ensure demo user exists (always — even without CSV) ───────────
         $apiKey = env('DEMO_API_KEY', 'ShopAIDemoKey2026xK9mN2pQr8vXjL5wA3hE9tYcF6bDsG4iZ0uV1nMoR7qTkP2');
 
         $user = User::firstOrCreate(
@@ -64,7 +58,15 @@ class DemoProductSeeder extends Seeder
             $user->update(['api_key' => $apiKey, 'client_id' => self::CLIENT_ID, 'is_active' => true]);
         }
 
-        // ── Wipe existing demo products ───────────────────────────────────────
+        $this->command->info("Demo user ready  →  API key: {$apiKey}");
+
+        if (! file_exists(self::CSV_PATH)) {
+            $this->command->warn('CSV not found: ' . self::CSV_PATH);
+            $this->command->warn('Chat is ready. Place eCommerceMaster.csv in database/seeders/data/ and re-run to import products.');
+            return;
+        }
+
+        // ── Wipe existing demo products ───────────────────────────────────
         DB::table('products')->where('client_id', self::CLIENT_ID)->delete();
         $this->command->info('Cleared existing demo products.');
 
