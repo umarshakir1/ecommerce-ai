@@ -72,16 +72,24 @@ class ChatController extends Controller
             $history = $this->getConversationHistory($sessionId);
 
             // ── 3. Classify conversational intent with prior context ───────────
-            // Passing the last 4 turns lets the classifier correctly handle
-            // follow-ups like "what about in blue?" after a hoodie discussion.
             $conversationalIntent = $this->intentService->classify(
                 $userMessage,
-                array_slice($history, -4)
+                array_slice($history, -6)
             );
             Log::info('Conversational intent classified', [
                 'intent'  => $conversationalIntent,
                 'session' => $sessionId,
             ]);
+
+            // Promote 'question' intent to 'product_search' when recent products
+            // exist in the session — user is asking about something they just saw.
+            $promotedContextProducts = [];
+            if ($conversationalIntent === 'question') {
+                $promotedContextProducts = $this->getRecentContextProducts($sessionId, $clientId);
+                if (!empty($promotedContextProducts)) {
+                    $conversationalIntent = 'product_search';
+                }
+            }
 
             // ── 4. Non-shopping path ─────────────────────────────────────────
             // Greetings, casual talk, unrelated messages, and general questions
@@ -122,10 +130,10 @@ class ChatController extends Controller
             $queryEmbedding = $this->aiService->generateEmbedding($embeddingText);
 
             // 5d. Hybrid vector + SQL search — always scoped to this client
-            // Short-circuit: follow-up questions about a previously shown product
-            // ("what is the sku of above part") reuse the last session products.
-            $products = [];
-            if ($this->isFollowUpReference($userMessage)) {
+            // Seed with promoted context products (from question→product_search promotion)
+            // or short-circuit on explicit follow-up references.
+            $products = $promotedContextProducts;
+            if (empty($products) && $this->isFollowUpReference($userMessage)) {
                 $products = $this->getRecentContextProducts($sessionId, $clientId);
             }
 
@@ -233,7 +241,7 @@ class ChatController extends Controller
                 [$combined, $embedding] = $this->aiService->classifyExtractAndEmbed(
                     $contextualQuery,
                     $contextualQuery,
-                    array_slice($history, -4)
+                    array_slice($history, -6)
                 );
 
                 $conversationalIntent = $greetingIntent
@@ -243,6 +251,16 @@ class ChatController extends Controller
                     'intent'  => $conversationalIntent,
                     'session' => $sessionId,
                 ]);
+
+                // Promote 'question' intent to 'product_search' when the session
+                // already has products — user is asking about something they saw.
+                $streamPromotedProducts = [];
+                if ($conversationalIntent === 'question') {
+                    $streamPromotedProducts = $this->getRecentContextProducts($sessionId, $clientId);
+                    if (!empty($streamPromotedProducts)) {
+                        $conversationalIntent = 'product_search';
+                    }
+                }
 
                 // Send extracted attributes immediately so the UI can show them
                 $this->sendSSE('intent', [
@@ -278,10 +296,11 @@ class ChatController extends Controller
 
                 // ── 4. Shopping path: vector search ──────────────────────────
                 $intent   = $combined;
-                $products = [];
+                // Seed with promoted products (from question→product_search) or
+                // short-circuit explicit follow-up references.
+                $products = $streamPromotedProducts;
 
-                // Short-circuit follow-ups about previously shown products
-                if ($this->isFollowUpReference($userMessage)) {
+                if (empty($products) && $this->isFollowUpReference($userMessage)) {
                     $products = $this->getRecentContextProducts($sessionId, $clientId);
                 }
 
@@ -366,17 +385,16 @@ class ChatController extends Controller
     // -------------------------------------------------------------------------
 
     /**
-     * Enrich a follow-up query with prior conversation context so the
-     * embedding and intent extractor have enough signal to work with.
+     * Enrich a follow-up query with the ORIGINAL topic from the conversation
+     * so the embedding and intent extractor have enough signal to work with.
      *
-     * Examples:
-     *   history last user msg: "I want a black hoodie size L"
-     *   current msg:           "what about in white?"
-     *   result:                "I want a black hoodie size L. what about in white?"
-     *
-     * Only triggers when the current message looks like a follow-up
-     * (short, or contains referential language). Standalone queries
-     * are returned unchanged.
+     * Key improvement over naive "last user message" approach:
+     * we scan back to find the last SUBSTANTIVE (non-follow-up) user message
+     * so that multi-turn follow-up chains like:
+     *   Turn 1: "I need a shock absorber for Volvo"  ← topic
+     *   Turn 2: "what about the price?"              ← follow-up
+     *   Turn 3: "same but for IVECO"                 ← follow-up
+     * always get enriched with Turn 1 context, not Turn 2.
      */
     private function buildContextualQuery(string $currentMessage, array $history): string
     {
@@ -384,23 +402,9 @@ class ChatController extends Controller
             return $currentMessage;
         }
 
-        // Find the last user turn in history
-        $lastUserMessage = null;
-        foreach (array_reverse($history) as $turn) {
-            if (($turn['role'] ?? '') === 'user') {
-                $lastUserMessage = $turn['content'];
-                break;
-            }
-        }
-
-        if ($lastUserMessage === null || $lastUserMessage === $currentMessage) {
-            return $currentMessage;
-        }
-
         $msgLower = strtolower(trim($currentMessage));
 
-        // If the message clearly expresses a new, standalone purchase/search intent,
-        // never treat it as a follow-up regardless of length.
+        // Standalone new-search indicators — return unchanged immediately
         $newSearchIndicators = [
             'i want to buy', 'i want to get', 'i want a ', 'i want an ',
             'i need a ', 'i need an ', 'i am looking', "i'm looking",
@@ -414,20 +418,24 @@ class ChatController extends Controller
             }
         }
 
-        // Signals that the message IS a follow-up rather than a new query
+        // Expanded follow-up signal phrases
         $followUpPhrases = [
-            'what about', 'how about', 'and also', 'any in',
+            'what about', 'how about', 'and also', 'any in', 'any for',
             'instead', 'same but', 'cheaper', 'more expensive', 'similar',
             'different color', 'different size', 'in blue', 'in red',
             'in black', 'in white', 'in green', 'in yellow', 'in pink',
             'in large', 'in small', 'in xl', 'in xs', 'in xxl',
             'any other', 'can you show', 'something else',
             'what is the price', 'how much', 'its price', 'the price',
+            'price of', 'cost of', 'any cheaper', 'show me more',
+            'what is the sku', "its sku", 'the sku', 'available',
+            'in stock', 'any alternative', 'for iveco', 'for volvo',
+            'for man ', 'for daf ', 'for scania', 'for mercedes', 'for renault',
+            'do you have', 'got any', 'any other brand', 'what brand',
         ];
 
-        // Only auto-treat as follow-up if very short (< 30 chars) — reduces false positives
-        $isFollowUp = mb_strlen($currentMessage) < 30;
-
+        // Short message (<= 35 chars) is almost always a follow-up
+        $isFollowUp = mb_strlen(trim($currentMessage)) <= 35;
         if (!$isFollowUp) {
             foreach ($followUpPhrases as $phrase) {
                 if (str_contains($msgLower, $phrase)) {
@@ -437,9 +445,68 @@ class ChatController extends Controller
             }
         }
 
-        return $isFollowUp
-            ? "{$lastUserMessage}. {$currentMessage}"
-            : $currentMessage;
+        if (!$isFollowUp) {
+            return $currentMessage;
+        }
+
+        // Find the TOPIC message: last substantial user message that isn't itself a follow-up
+        $topicMessage = $this->findTopicMessage($history, $followUpPhrases);
+
+        if ($topicMessage === null || $topicMessage === $currentMessage) {
+            return $currentMessage;
+        }
+
+        return "{$topicMessage}. {$currentMessage}";
+    }
+
+    /**
+     * Scan backwards through history to find the last "topical" user message
+     * — i.e. the most recent user turn that is NOT a pure follow-up.
+     * This preserves the original search subject across multi-turn follow-ups.
+     */
+    private function findTopicMessage(array $history, array $followUpPhrases): ?string
+    {
+        $userMessages = [];
+        foreach ($history as $turn) {
+            if (($turn['role'] ?? '') === 'user') {
+                $userMessages[] = $turn['content'];
+            }
+        }
+
+        if (empty($userMessages)) {
+            return null;
+        }
+
+        // Walk backwards; skip short or follow-up-looking messages
+        foreach (array_reverse($userMessages) as $msg) {
+            $msgL = strtolower(trim($msg));
+
+            // Skip if very short (pure follow-up like "price?" or "ok")
+            if (mb_strlen($msgL) < 12) {
+                continue;
+            }
+
+            // Skip if it starts with a follow-up phrase
+            $looksLikeFollowUp = false;
+            foreach ($followUpPhrases as $phrase) {
+                if (str_starts_with($msgL, $phrase)) {
+                    $looksLikeFollowUp = true;
+                    break;
+                }
+            }
+
+            // Also skip single-word or very short follow-up keywords
+            if (in_array($msgL, ['price', 'cost', 'sku', 'available', 'cheaper', 'more', 'details', 'ok', 'yes', 'no'], true)) {
+                $looksLikeFollowUp = true;
+            }
+
+            if (!$looksLikeFollowUp) {
+                return $msg;  // ← original topic found
+            }
+        }
+
+        // Fallback: oldest user message
+        return $userMessages[0];
     }
 
     /**
@@ -642,24 +709,42 @@ class ChatController extends Controller
     }
 
     /**
-     * Detect follow-up questions about a previously shown product.
-     * e.g. "what is the sku of above part", "its price", "tell me more about that"
+     * Detect follow-up questions that should REUSE the last shown products
+     * (i.e. user is asking metadata ABOUT prior results, not searching for new ones).
+     *
+     * Returns true ONLY when the user wants a property of a product already shown:
+     *   price, SKU, weight, availability, specs, brand of the same item.
+     *
+     * Returns false for "find different products" follow-ups like:
+     *   "same but for IVECO", "any cheaper?", "show me more", "any alternatives?"
+     *   — these should do a new enriched search, not reuse old results.
      */
     private function isFollowUpReference(string $message): bool
     {
+        $msgL = strtolower(trim($message));
+
+        // Explicit metadata patterns (about the same previously shown product)
         $patterns = [
             '/\b(above|previous|last|that|same)\s*(product|part|item|one)\b/i',
-            '/\b(sku|price|cost|name|image|description|detail|info)\s*(of|for)?\s*(above|that|previous|it|this)\b/i',
-            '/\bwhat\s+(is|are)\s+(the|its|their)\s+(sku|price|name|detail|description)\b/i',
-            '/\bits\s+(sku|price|name|description|detail|cost)\b/i',
-            '/\bmore\s+(about|detail|info)\s+(that|the\s+above|previous|it|this)\b/i',
+            '/\b(sku|price|cost|weight|dimension|spec|description|detail|info)\s*(of|for)?\s*(above|that|previous|it|this|the\s+part|the\s+product)\b/i',
+            '/\bwhat\s+(is|are)\s+(the|its|their)\s+(sku|price|cost|weight|brand|name|detail|description)\b/i',
+            '/\bits\s+(sku|price|cost|weight|name|description|detail)\b/i',
+            '/\bmore\s+(detail|info|about)\s+(that|the\s+above|previous|it|this)\b/i',
             '/\bshow\s+me\s+more\s+about\s+(it|that|this|above)\b/i',
+            '/^(what about|how about)\s+(the\s+)?(price|cost|sku|weight)\b/i',
+            '/^(price|cost|how much|sku)\??$/i',
+            '/\bhow\s+much\s+(is|does|for)\s+(it|that|this|the\s+above)\b/i',
+            '/\bwhat.*(sku|part\s*number)\b/i',
+            '/\bis\s+(it|this|that)\s+(available|in\s+stock)\b/i',
+            '/\bstock\s+status\b/i',
         ];
+
         foreach ($patterns as $pattern) {
             if (preg_match($pattern, $message)) {
                 return true;
             }
         }
+
         return false;
     }
 
@@ -774,6 +859,7 @@ class ChatController extends Controller
 
         // ── If message contains shopping signals, let API classify ────────────
         $shoppingSignals = [
+            // Clothing / fashion
             'buy', 'shirt', 'hoodie', 'jacket', 'jeans', 'pants', 'shoes',
             'sneakers', 'clothes', 'clothing', 'outfit', 'wear', 'dress',
             'suit', 'blazer', 'coat', 'hat', 'cap', 'bag', 'wallet', 'belt',
@@ -781,6 +867,16 @@ class ChatController extends Controller
             'casual', 'formal', 'style', 'fabric', 'material', 'scarf',
             'recommend', 'suggestion', 'find me', 'looking for', 'want a',
             'need a', 'budget', 'affordable', 'expensive',
+            // Automotive / industrial parts
+            'shock', 'absorber', 'brake', 'brakes', 'chamber', 'suspension',
+            'air dryer', 'valve', 'filter', 'compressor', 'caliper', 'clutch',
+            'volvo', 'iveco', 'scania', 'mercedes', 'man ', 'daf ', 'renault',
+            'wabco', 'haldex', 'meritor', 'sachs', 'knorr', 'bosch',
+            'sku', 'part', 'parts', 'cross reference', 'oem', 'supplier',
+            'truck', 'trailer', 'axle', 'wheel', 'bearing', 'seal',
+            // Generic shopping follow-ups that should go to API
+            'what about', 'how about', 'any cheaper', 'same but', 'show more',
+            'in stock', 'available', 'alternative', 'similar',
         ];
         foreach ($shoppingSignals as $signal) {
             if (str_contains($clean, $signal)) {

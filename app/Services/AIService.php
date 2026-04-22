@@ -188,28 +188,23 @@ PROMPT;
 You are an intelligent and friendly eCommerce shopping assistant named ShopAI.
 
 ABSOLUTE RULES — follow these exactly:
-1. LIVE INVENTORY: The "--- PRODUCTS FOUND ---" section below is a LIVE search result showing products that ARE in stock right now. These products EXIST. Never say a product is unavailable if it appears in that section.
-2. NEVER CONTRADICT THE PRODUCT LIST: If a product is in "--- PRODUCTS FOUND ---", you MUST recommend it when relevant. Do NOT say "I don't have X" if X is listed there.
-3. BASE RECOMMENDATIONS ON CURRENT RESULTS: Recommend ONLY from the current "--- PRODUCTS FOUND ---" section. Do NOT recommend products mentioned in previous conversation turns.
-4. PRICE: Always state the exact price from the product data as "$X.XX". For price queries, answer directly.
-5. SHORT FOLLOW-UPS: If the user says "price", "how much", or similar short follow-ups, answer using the most recently discussed products.
-6. NO PERFECT MATCH: If the product list is empty or genuinely irrelevant, say so and suggest trying different search terms.
-7. Keep responses under 120 words. Be natural, not robotic. Never say "As an AI".
+1. LIVE INVENTORY: Products in "--- PRODUCTS FOUND ---" ARE in stock. Never say unavailable if listed.
+2. NEVER CONTRADICT THE PRODUCT LIST.
+3. FOLLOW-UP AWARENESS: If the user asks a follow-up ("price?", "its sku?", "any cheaper?", "same but for X?"), answer from "PRODUCTS FOUND". If "PRODUCTS FOUND" is empty, look at the conversation history for previously shown products and answer from those.
+4. PRICE: Always state exact price as "$X.XX". For price/cost queries, answer directly with the number.
+5. SKU QUERIES: If user asks for SKU, state the exact SKU from the product data.
+6. NO MATCH: If products list is empty and no prior context, say so briefly and suggest different terms.
+7. Keep responses under 120 words. Be natural. Never say "As an AI".
 PROMPT;
 
-        // Build a concise product context block
         $productContext = $this->formatProductsForPrompt($products);
-
-        // Build message history (last 6 turns for context, not product history)
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
-
-        foreach (array_slice($conversationHistory, -6) as $turn) {
+        foreach (array_slice($conversationHistory, -8) as $turn) {
             $messages[] = $turn;
         }
-
         $messages[] = [
             'role'    => 'user',
-            'content' => "My request: {$userQuery}\n\n--- PRODUCTS FOUND (live inventory — these ARE available) ---\n{$productContext}\n---\n\nRecommend the most relevant products from the list above and explain why they match my request.",
+            'content' => "User request: {$userQuery}\n\n--- PRODUCTS FOUND ---\n{$productContext}\n---\n\nRespond helpfully to the user's request using the products above.",
         ];
 
         try {
@@ -255,13 +250,14 @@ You are an eCommerce assistant analyzer for an industrial/automotive parts catal
 - "keywords": array of relevant product search keywords (max 6). Correct obvious spelling mistakes (e.g. "break" → "brake", "absorber" → "absorber", "chambre" → "chamber", "surpensor" → "suspension"). Return the corrected form.
 
 Rules for conversational_intent:
-- History shows products + follow-up message ("what about in white?", "how much?") → "product_search"
-- Any mention of a part number, SKU, OEM code, or product search → "product_search"
+- CRITICAL: If conversation history shows products were discussed AND current message is any follow-up (price, cost, sku, brand, cheaper, more, details, availability, same but, what about, any in, for X brand/model) → ALWAYS "product_search"
+- Any mention of a part number, SKU, OEM code → "product_search"
+- Explicit product requests → "product_search"
+- Asking for suggestions → "recommendation"
 - Greetings/hello/hi/salam → "greeting"
 - Small talk/jokes → "casual"
 - Off-topic (weather, coding, cooking) → "unrelated"
-- Explicit product requests → "product_search"
-- Asking for suggestions → "recommendation"
+- Ambiguous short follow-ups when prior context exists → "product_search" (safe default)
 PROMPT;
 
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
@@ -341,22 +337,21 @@ You are an intelligent and friendly eCommerce shopping assistant named ShopAI.
 ABSOLUTE RULES:
 1. LIVE INVENTORY: Products in "--- PRODUCTS FOUND ---" ARE in stock. Never say unavailable if listed.
 2. NEVER CONTRADICT THE PRODUCT LIST.
-3. BASE RECOMMENDATIONS ON CURRENT RESULTS ONLY.
-4. PRICE: Always state exact price as "$X.XX".
-5. SHORT FOLLOW-UPS: If user says "price" or "how much", answer from most recently discussed products.
-6. NO PERFECT MATCH: If product list is empty, say so and suggest different terms.
-7. Keep responses under 120 words. Be natural. Never say "As an AI".
+3. FOLLOW-UP AWARENESS: If user asks a follow-up ("price?", "its sku?", "any cheaper?", "same for X?"), answer from "PRODUCTS FOUND". If empty, use conversation history products.
+4. PRICE: Always state exact price as "$X.XX". Answer price questions directly.
+5. SKU QUERIES: State exact SKU from product data.
+6. NO MATCH: If products empty and no prior context exists, say so briefly.
+7. Under 120 words. Natural tone. Never say "As an AI".
 PROMPT;
 
         $productContext = $this->formatProductsForPrompt($products);
-
         $messages = [['role' => 'system', 'content' => $systemPrompt]];
-        foreach (array_slice($conversationHistory, -6) as $turn) {
+        foreach (array_slice($conversationHistory, -8) as $turn) {
             $messages[] = $turn;
         }
         $messages[] = [
             'role'    => 'user',
-            'content' => "My request: {$userQuery}\n\n--- PRODUCTS FOUND (live inventory) ---\n{$productContext}\n---\n\nRecommend the most relevant products from the list above.",
+            'content' => "User request: {$userQuery}\n\n--- PRODUCTS FOUND ---\n{$productContext}\n---\n\nRespond helpfully.",
         ];
 
         yield from $this->chatCompletionStream($messages, 0.7, 400);
@@ -492,6 +487,7 @@ PROMPT;
 
     /**
      * Format product list into a readable string for the AI prompt.
+     * Handles new universal schema: attributes/categories/suppliers are JSON.
      */
     private function formatProductsForPrompt(array $products): string
     {
@@ -501,27 +497,46 @@ PROMPT;
 
         $lines = [];
         foreach ($products as $i => $product) {
-            $num    = $i + 1;
-            $name   = $product['name']        ?? 'N/A';
-            $brand  = !empty($product['brand'])    ? ' by ' . $product['brand'] : '';
-            $sku    = !empty($product['sku'])       ? ' [SKU: ' . $product['sku'] . ']' : '';
-            $cat    = $product['category']    ?? 'N/A';
-            $color  = $product['color']       ?? 'N/A';
-            $size   = $product['size']        ?? 'N/A';
-            $price  = isset($product['price']) ? '$' . number_format($product['price'], 2) : 'N/A';
-            $desc   = $product['description'] ?? '';
-            $score  = isset($product['similarity_score'])
-                ? ' [match: ' . round($product['similarity_score'] * 100, 1) . '%]'
-                : '';
+            $num   = $i + 1;
+            $name  = $product['name'] ?? 'N/A';
+            $sku   = !empty($product['sku']) ? ' [SKU: ' . $product['sku'] . ']' : '';
+            $price = isset($product['price']) ? '$' . number_format((float)$product['price'], 2) : 'N/A';
+            $desc  = $product['short_description'] ?? ($product['description'] ?? '');
+            $score = isset($product['similarity_score'])
+                ? ' [' . round($product['similarity_score'] * 100, 1) . '%]' : '';
 
-            // Show available variant info so the AI can inform the user
-            $availSizes  = !empty($product['available_sizes'])  ? "\n   Available sizes: "  . implode(', ', (array) $product['available_sizes'])  : '';
-            $availColors = !empty($product['available_colors']) ? "\n   Available colors: " . implode(', ', (array) $product['available_colors']) : '';
+            // Decode JSON columns safely
+            $attrs = $this->decodeJson($product['attributes'] ?? null);
+            $cats  = $this->decodeJson($product['categories'] ?? null);
+            $sups  = $this->decodeJson($product['suppliers']  ?? null);
+            $crefs = $this->decodeJson($product['cross_reference'] ?? null);
 
-            $lines[] = "{$num}. {$name}{$brand}{$sku} ({$cat}) - Color: {$color}, Size: {$size}, Price: {$price}{$score}\n   {$desc}{$availSizes}{$availColors}";
+            $brand    = $attrs['brand']          ?? ($sups[0] ?? null);
+            $category = !empty($cats) ? $cats[0] : null;
+            $cm       = $attrs['commodity_code'] ?? null;
+            $synonym  = $attrs['synonym']        ?? null;
+
+            $parts = ["{$num}. **{$name}**{$sku} — Price: {$price}{$score}"];
+            if ($brand)    $parts[] = "Supplier/Brand: {$brand}";
+            if ($category) $parts[] = "Category: {$category}";
+            if (!empty($sups) && count($sups) > 1) $parts[] = 'Suppliers: ' . implode(', ', array_slice($sups, 0, 3));
+            if ($cm)       $parts[] = "Commodity: {$cm}";
+            if ($synonym && $synonym !== $product['sku']) $parts[] = "Ref: {$synonym}";
+            if (!empty($crefs)) $parts[] = 'CrossRef: ' . implode(', ', array_slice($crefs, 0, 2));
+            if ($desc)     $parts[] = "   {$desc}";
+
+            $lines[] = implode(' | ', array_slice($parts, 0, 6)) . (isset($parts[6]) ? "\n   {$parts[6]}" : '');
         }
 
         return implode("\n\n", $lines);
+    }
+
+    /** Safely decode a JSON column that may already be an array. */
+    private function decodeJson(mixed $value): array
+    {
+        if (is_array($value))  return $value;
+        if (is_string($value)) return json_decode($value, true) ?? [];
+        return [];
     }
 
     /**
